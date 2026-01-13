@@ -8,6 +8,9 @@ Extrair + filtrar + enriquecer + pontuar + armazenar leads, com reuso de enrique
 ## Arquitetura (Waterfall B2B)
 A) EXTRACT (Casa dos Dados) -> B) STAGING (SQLite) -> C) CLEAN/DEDUP/FLAGS -> D) SCORE v1 -> E) ENRICH async (top X%) -> F) TECH DETECTION -> G) SCORE v2 -> H) VAULT + EXPORTS
 
+Fluxo Casa dos Dados (quando exportar tudo):
+1) Pesquisa v5 -> 2) Gerar arquivo v5 -> 3) Listar solicitacoes v4 -> 4) Consultar link v4 public -> 5) Import/Process/Enrich/Export
+
 ## Estrutura do projeto
 ```
 hunter-os/
@@ -41,21 +44,21 @@ Use `.env` ou export no shell:
 
 ```
 CASA_DOS_DADOS_API_KEY=...
-SERPDEV_API_KEY=...
+SERPER_API_KEY=...
 BUILTWITH_API_KEY=...
-SEARCH_PROVIDER=serpdev
+SEARCH_PROVIDER=serper
 CACHE_TTL_HOURS=24
 CONCURRENCY=10
 TIMEOUT=5
 HUNTER_DB_PATH=hunter.db
 ```
 
-### Bulk export (opcional)
-Para habilitar modo **bulk**, configure os endpoints:
+### Export Casa dos Dados
+O app usa os endpoints oficiais (v5/v4) por padrao. Se precisar sobrescrever:
 ```
 CASA_DOS_DADOS_EXPORT_CREATE_URL=...
-CASA_DOS_DADOS_EXPORT_STATUS_URL=.../{job_id}
-CASA_DOS_DADOS_EXPORT_DOWNLOAD_URL=.../{job_id}
+CASA_DOS_DADOS_EXPORT_LIST_URL=...
+CASA_DOS_DADOS_EXPORT_STATUS_V4_PUBLIC_URL=...
 ```
 
 ### Executar
@@ -64,14 +67,20 @@ streamlit run app.py
 ```
 
 ## Como funciona a pesquisa
-- **Extract**: consulta Casa dos Dados por UF/municipio/CNAE com `situacao_cadastral=ATIVA`.
-- **Cache por fingerprint**: o payload e resultados ficam cacheados por TTL.
-- **Staging**: resultados brutos entram em `leads_raw`.
+- **Extract**: consulta Casa dos Dados por UF/municipio/CNAE com `situacao_cadastral=ATIVA` e limite duro.
+- **Cache por fingerprint**: reusa resultados ja extraidos sem novas chamadas.
+- **Staging**: resultados brutos entram em `leads_raw` (idempotente por run).
 - **Cleaning**: normaliza telefones/emails, remove MEI, detecta contador-like, marca telefone repetido.
 - **Score v1**: define top X% para enriquecimento.
 - **Enrichment async**: busca site/redes via provider e detecta tecnologias por assinatura.
 - **Score v2**: usa dados de enriquecimento e flags para pontuacao final.
 - **Vault**: resultados enriquecidos ficam reutilizaveis em `enrichments`.
+
+## UX (abas principais)
+- **Buscar**: roda o pipeline ou cria export CSV completo na Casa dos Dados.
+- **Exports (Casa dos Dados)**: fila real de exports + consulta do link (200/202).
+- **Recovery**: importa CSV ja baixado e reconstrui pipeline sem novas chamadas.
+- **Diagnostico**: etapas, chamadas de API e erros por run.
 
 ## Enrichment Vault
 Tabela `enrichments` usa UPSERT por CNPJ para reaproveitar enriquecimentos antigos.
@@ -87,9 +96,13 @@ Colunas base: cnpj, razao_social, cidade, cnae, score, contact_quality, site, in
 
 ## Observabilidade
 - Logs estruturados em `logs`
-- Runs em `enrichment_runs`
-- Erros por lead sem quebrar a run
+- Runs em `runs`
+- Etapas em `run_steps`
+- Chamadas em `api_calls`
+- Erros em `errors`
+- Snapshots de exports em `exports_status_snapshots`
 
 ## Notas
 - `cache.db` e `hunter_cache.db` sao legados e podem ser ignorados.
 - Provider de busca e chaves podem ser ajustados na aba **Config** do app.
+- Modulos legacy no root (`data_sources.py`, `utils.py`, `lead_processing.py`) sao wrappers deprecated.

@@ -192,13 +192,34 @@ def contact_quality(flags: Dict[str, Any]) -> str:
     return "ok"
 
 
-def clean_batch(raw_leads: List[Dict[str, Any]], exclude_mei: bool = True, min_repeat: int = 5) -> List[Dict[str, Any]]:
+def clean_batch(
+    raw_leads: List[Dict[str, Any]],
+    exclude_mei: bool = True,
+    min_repeat: int = 5,
+    return_stats: bool = False,
+) -> Any:
     cleaned = []
+    removed_mei = 0
+    removed_other = 0
     for raw in raw_leads:
         lead = clean_lead(raw, exclude_mei=exclude_mei)
         if lead:
             cleaned.append(lead)
+        else:
+            if exclude_mei and is_mei(raw):
+                removed_mei += 1
+            else:
+                removed_other += 1
     apply_repeated_phone_flags(cleaned, min_count=min_repeat)
     for lead in cleaned:
         lead["contact_quality"] = contact_quality(lead["flags"])
+
+    if return_stats:
+        stats = {
+            "input_count": len(raw_leads),
+            "output_count": len(cleaned),
+            "removed_mei": removed_mei,
+            "removed_other": removed_other,
+        }
+        return cleaned, stats
     return cleaned

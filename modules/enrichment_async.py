@@ -11,7 +11,7 @@ from urllib.parse import urljoin, urlparse
 import aiohttp
 
 from modules import storage
-from modules.providers import SearchProvider
+from modules.providers import ProviderResponseError, SearchProvider
 
 CONTACT_PATHS = ["/contato", "/fale-conosco", "/contact", "/contato/", "/fale-conosco/"]
 
@@ -64,6 +64,25 @@ def _detect_tech(html: str) -> Tuple[Dict[str, bool], int]:
             detected[key] = True
             score += TECH_WEIGHTS.get(key, 0)
     return detected, min(score, 30)
+
+
+def _sanitize_error_message(message: str) -> str:
+    if not message:
+        return ""
+    return re.sub(r"(api_key=)[^&\\s]+", r"\\1***", message, flags=re.IGNORECASE)
+
+
+def _provider_hint(provider_name: str, message: str) -> Optional[str]:
+    provider = (provider_name or "").lower()
+    msg = (message or "").lower()
+    if provider == "serper":
+        if "text/html" in msg or "nao-json" in msg or "lander" in msg:
+            return (
+                "Serper.dev retornou HTML (lander/bloqueio). Verifique plano/chave no painel "
+                "ou confirme se a chave tem permissao ativa."
+            )
+        return "Verifique a chave/plano no painel do Serper.dev."
+    return None
 
 
 class AsyncEnricher:
@@ -183,23 +202,76 @@ class AsyncEnricher:
         leads: List[Dict[str, Any]],
         run_id: str,
         cancel_event: Optional[asyncio.Event] = None,
-    ) -> List[Dict[str, Any]]:
+    ) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
         semaphore = asyncio.Semaphore(self.concurrency)
         results: List[Dict[str, Any]] = []
+        provider_error: Dict[str, Any] = {}
+        provider_error_count = 0
+        provider_error_logged = False
+        provider_error_lock = asyncio.Lock()
+        stop_event = asyncio.Event()
 
         async def runner(lead: Dict[str, Any]):
             if cancel_event and cancel_event.is_set():
                 return
+            if stop_event.is_set():
+                return
             async with semaphore:
+                if stop_event.is_set():
+                    return
                 try:
                     enriched = await self._enrich_one(session, lead, run_id)
                     results.append(enriched)
+                except ProviderResponseError as exc:
+                    nonlocal provider_error_count, provider_error_logged
+                    message = _sanitize_error_message(str(exc))
+                    provider_name = getattr(self.provider, "name", "unknown")
+                    hint = _provider_hint(provider_name, message)
+                    async with provider_error_lock:
+                        provider_error_count += 1
+                        if not provider_error:
+                            provider_error.update(
+                                {
+                                    "provider": provider_name,
+                                    "message": message,
+                                    "hint": hint,
+                                }
+                            )
+                        if not provider_error_logged:
+                            storage.log_event(
+                                "error",
+                                "enrichment_provider_error",
+                                {
+                                    "run_id": run_id,
+                                    "provider": provider_error.get("provider"),
+                                    "error": message,
+                                    "hint": hint,
+                                },
+                            )
+                            if hint:
+                                storage.log_event(
+                                    "warning",
+                                    "enrichment_provider_hint",
+                                    {"run_id": run_id, "provider": provider_name, "hint": hint},
+                                )
+                            storage.record_error(run_id, "enriching", f"{message} {hint or ''}".strip())
+                            provider_error_logged = True
+                    stop_event.set()
                 except Exception as exc:
-                    storage.log_event("error", "enrichment_error", {"cnpj": lead.get("cnpj"), "error": str(exc)})
+                    storage.log_event(
+                        "error",
+                        "enrichment_error",
+                        {"cnpj": lead.get("cnpj"), "error": _sanitize_error_message(str(exc))},
+                    )
 
         timeout = aiohttp.ClientTimeout(total=self.timeout + 2)
         async with aiohttp.ClientSession(timeout=timeout) as session:
             tasks = [runner(lead) for lead in leads]
             await asyncio.gather(*tasks)
 
-        return results
+        stats = {
+            "provider_error": provider_error or None,
+            "provider_error_count": provider_error_count,
+            "skipped_due_to_provider_error": bool(stop_event.is_set()),
+        }
+        return results, stats

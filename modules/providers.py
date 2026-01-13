@@ -1,6 +1,8 @@
 """Search provider abstractions for enrichment."""
 
+import json
 import os
+import re
 from abc import ABC, abstractmethod
 from typing import Any, Dict, List
 
@@ -18,6 +20,16 @@ SOCIAL_BLOCKLIST = [
 ]
 
 
+class ProviderResponseError(RuntimeError):
+    """Raised when a search provider returns a non-JSON or error response."""
+
+
+def _redact_api_key(text: str) -> str:
+    if not text:
+        return ""
+    return re.sub(r"(api_key=)[^&\\s]+", r"\\1***", text, flags=re.IGNORECASE)
+
+
 class SearchProvider(ABC):
     name: str = "base"
 
@@ -25,9 +37,30 @@ class SearchProvider(ABC):
     async def search(self, session: aiohttp.ClientSession, query: str) -> Dict[str, Any]:
         raise NotImplementedError
 
+    async def _safe_json(self, resp: aiohttp.ClientResponse) -> Dict[str, Any]:
+        content_type = resp.headers.get("Content-Type", "")
+        text = await resp.text()
+        if resp.status >= 400:
+            excerpt = _redact_api_key(text).replace("\n", " ")[:200]
+            raise ProviderResponseError(f"{self.name} HTTP {resp.status}: {excerpt}")
+        try:
+            return json.loads(text)
+        except json.JSONDecodeError:
+            excerpt = _redact_api_key(text).replace("\n", " ")[:200]
+            if content_type:
+                raise ProviderResponseError(
+                    f"{self.name} resposta nao-JSON (content-type={content_type}): {excerpt}"
+                )
+            raise ProviderResponseError(f"{self.name} resposta nao-JSON: {excerpt}")
+
     def _extract_links(self, data: Dict[str, Any]) -> List[str]:
         links: List[str] = []
         if isinstance(data, dict):
+            if "organic" in data:
+                for item in data.get("organic", []) or []:
+                    link = item.get("link") or item.get("url")
+                    if link:
+                        links.append(link)
             if "organic_results" in data:
                 for item in data.get("organic_results", []) or []:
                     link = item.get("link") or item.get("url")
@@ -74,67 +107,33 @@ class SearchProvider(ABC):
         }
 
 
-class SerpDevProvider(SearchProvider):
-    name = "serpdev"
+class SerperProvider(SearchProvider):
+    name = "serper"
 
     def __init__(self, api_key: str, base_url: str = None):
         self.api_key = api_key
-        self.base_url = base_url or os.getenv("SERPDEV_BASE_URL", "https://serp.dev/api/v1/search")
+        self.base_url = base_url or os.getenv("SERPER_BASE_URL", "https://google.serper.dev/search")
+        self.gl = os.getenv("SERPER_GL", "br")
+        self.hl = os.getenv("SERPER_HL", "pt-br")
 
     async def search(self, session: aiohttp.ClientSession, query: str) -> Dict[str, Any]:
-        params = {"api_key": self.api_key, "q": query}
-        async with session.get(self.base_url, params=params) as resp:
-            data = await resp.json()
-        links = self._extract_links(data)
-        return self._classify(links)
-
-
-class SerpApiProvider(SearchProvider):
-    name = "serpapi"
-
-    def __init__(self, api_key: str, base_url: str = None):
-        self.api_key = api_key
-        self.base_url = base_url or os.getenv("SERPAPI_BASE_URL", "https://serpapi.com/search.json")
-
-    async def search(self, session: aiohttp.ClientSession, query: str) -> Dict[str, Any]:
-        params = {"api_key": self.api_key, "q": query}
-        async with session.get(self.base_url, params=params) as resp:
-            data = await resp.json()
-        links = self._extract_links(data)
-        return self._classify(links)
-
-
-class BingProvider(SearchProvider):
-    name = "bing"
-
-    def __init__(self, api_key: str, base_url: str = None):
-        self.api_key = api_key
-        self.base_url = base_url or os.getenv("BING_BASE_URL", "https://api.bing.microsoft.com/v7.0/search")
-
-    async def search(self, session: aiohttp.ClientSession, query: str) -> Dict[str, Any]:
-        headers = {"Ocp-Apim-Subscription-Key": self.api_key}
-        params = {"q": query}
-        async with session.get(self.base_url, headers=headers, params=params) as resp:
-            data = await resp.json()
+        headers = {
+            "X-API-KEY": self.api_key,
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+        payload = {"q": query, "gl": self.gl, "hl": self.hl}
+        async with session.post(self.base_url, headers=headers, json=payload) as resp:
+            data = await self._safe_json(resp)
         links = self._extract_links(data)
         return self._classify(links)
 
 
 def select_provider(name: str) -> SearchProvider:
     name = (name or "").lower().strip()
-    if name == "serpdev":
-        key = os.getenv("SERPDEV_API_KEY")
+    if name == "serper":
+        key = os.getenv("SERPER_API_KEY")
         if not key:
-            raise RuntimeError("SERPDEV_API_KEY nao configurada")
-        return SerpDevProvider(key)
-    if name == "serpapi":
-        key = os.getenv("SERPAPI_API_KEY")
-        if not key:
-            raise RuntimeError("SERPAPI_API_KEY nao configurada")
-        return SerpApiProvider(key)
-    if name == "bing":
-        key = os.getenv("BING_API_KEY")
-        if not key:
-            raise RuntimeError("BING_API_KEY nao configurada")
-        return BingProvider(key)
-    raise RuntimeError("Search provider invalido")
+            raise RuntimeError("SERPER_API_KEY nao configurada")
+        return SerperProvider(key)
+    raise RuntimeError("Search provider invalido (use 'serper')")

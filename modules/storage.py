@@ -20,6 +20,19 @@ def _utcnow() -> str:
 def get_db_path() -> str:
     return os.getenv("HUNTER_DB_PATH", DEFAULT_DB_PATH)
 
+def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
+    row = conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table' AND name=?",
+        (name,),
+    ).fetchone()
+    return row is not None
+
+def _ensure_column(conn: sqlite3.Connection, table: str, column: str, col_type: str) -> None:
+    try:
+        conn.execute(f"ALTER TABLE {table} ADD COLUMN {column} {col_type}")
+    except sqlite3.OperationalError:
+        return
+
 
 @contextmanager
 def get_conn():
@@ -44,12 +57,17 @@ def init_db() -> None:
                 cnpj TEXT,
                 payload_json TEXT,
                 fetched_at TIMESTAMP,
-                source TEXT
+                source TEXT,
+                run_id TEXT,
+                export_uuid TEXT
             )
             """
         )
+        _ensure_column(conn, "leads_raw", "run_id", "TEXT")
+        _ensure_column(conn, "leads_raw", "export_uuid", "TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_raw_cnpj ON leads_raw(cnpj)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_raw_source ON leads_raw(source)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_raw_run_id ON leads_raw(run_id)")
 
         cur.execute(
             """
@@ -111,6 +129,55 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS runs (
+                run_id TEXT PRIMARY KEY,
+                created_at TIMESTAMP,
+                params_json TEXT,
+                status TEXT,
+                total_leads INTEGER,
+                enriched_count INTEGER,
+                errors_count INTEGER
+            )
+            """
+        )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS run_steps (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                step_name TEXT,
+                status TEXT,
+                started_at TIMESTAMP,
+                ended_at TIMESTAMP,
+                duration_ms INTEGER,
+                details_json TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_run_steps_run ON run_steps(run_id)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS api_calls (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                step_name TEXT,
+                method TEXT,
+                url TEXT,
+                status_code INTEGER,
+                duration_ms INTEGER,
+                payload_fingerprint TEXT,
+                request_id TEXT,
+                response_excerpt TEXT,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_api_calls_run ON api_calls(run_id)")
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS enrichments (
                 cnpj TEXT PRIMARY KEY,
                 run_id TEXT,
@@ -138,10 +205,30 @@ def init_db() -> None:
                 created_at TIMESTAMP,
                 filters_json TEXT,
                 row_count INTEGER,
-                file_path TEXT
+                file_path TEXT,
+                run_id TEXT,
+                arquivo_uuid TEXT,
+                payload_fingerprint TEXT,
+                status TEXT,
+                kind TEXT,
+                link TEXT,
+                expires_at TIMESTAMP,
+                updated_at TIMESTAMP,
+                total_linhas INTEGER
             )
             """
         )
+        _ensure_column(conn, "exports", "run_id", "TEXT")
+        _ensure_column(conn, "exports", "arquivo_uuid", "TEXT")
+        _ensure_column(conn, "exports", "payload_fingerprint", "TEXT")
+        _ensure_column(conn, "exports", "status", "TEXT")
+        _ensure_column(conn, "exports", "kind", "TEXT")
+        _ensure_column(conn, "exports", "link", "TEXT")
+        _ensure_column(conn, "exports", "expires_at", "TIMESTAMP")
+        _ensure_column(conn, "exports", "updated_at", "TIMESTAMP")
+        _ensure_column(conn, "exports", "total_linhas", "INTEGER")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_exports_run ON exports(run_id)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_exports_uuid ON exports(arquivo_uuid)")
 
         cur.execute(
             """
@@ -178,6 +265,67 @@ def init_db() -> None:
             )
             """
         )
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS exports_status_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                arquivo_uuid TEXT,
+                status TEXT,
+                quantidade INTEGER,
+                quantidade_solicitada INTEGER,
+                created_at TIMESTAMP,
+                raw_json TEXT
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_export_snapshots_uuid ON exports_status_snapshots(arquivo_uuid)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS exports_files (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                arquivo_uuid TEXT,
+                run_id TEXT,
+                file_path TEXT,
+                file_size INTEGER,
+                file_hash TEXT,
+                link TEXT,
+                expires_at TIMESTAMP,
+                downloaded_at TIMESTAMP
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_exports_files_uuid ON exports_files(arquivo_uuid)")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS errors (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                step_name TEXT,
+                lead_id TEXT,
+                error TEXT,
+                traceback TEXT,
+                created_at TIMESTAMP
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_errors_run ON errors(run_id)")
+
+        # Ensure legacy tables have new columns if they already existed.
+        # Migrate legacy enrichment_runs into runs once.
+        if _table_exists(conn, "enrichment_runs"):
+            has_runs = conn.execute("SELECT COUNT(*) AS cnt FROM runs").fetchone()["cnt"]
+            if has_runs == 0:
+                conn.execute(
+                    """
+                    INSERT INTO runs (run_id, created_at, params_json, status, total_leads, enriched_count, errors_count)
+                    SELECT run_id, created_at, params_json, status, total_leads, enriched_count, errors_count
+                    FROM enrichment_runs
+                    """
+                )
 
 
 def log_event(level: str, event: str, detail: Optional[Dict[str, Any]] = None) -> None:
@@ -259,7 +407,12 @@ def extract_cache_set(fingerprint: str, payload: Dict[str, Any], result_count: i
         )
 
 
-def insert_leads_raw(leads: List[Dict[str, Any]], source: str) -> None:
+def insert_leads_raw(
+    leads: List[Dict[str, Any]],
+    source: str,
+    run_id: Optional[str] = None,
+    export_uuid: Optional[str] = None,
+) -> None:
     if not leads:
         return
     rows = []
@@ -269,10 +422,16 @@ def insert_leads_raw(leads: List[Dict[str, Any]], source: str) -> None:
             json.dumps(lead, ensure_ascii=False),
             _utcnow(),
             source,
+            run_id,
+            export_uuid,
         ))
     with get_conn() as conn:
         conn.executemany(
-            "INSERT INTO leads_raw (cnpj, payload_json, fetched_at, source) VALUES (?, ?, ?, ?)",
+            """
+            INSERT OR IGNORE INTO leads_raw
+            (cnpj, payload_json, fetched_at, source, run_id, export_uuid)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
             rows,
         )
 
@@ -284,6 +443,39 @@ def fetch_leads_raw_by_source(source: str) -> List[Dict[str, Any]]:
             (source,),
         ).fetchall()
     return [json.loads(r["payload_json"]) for r in rows]
+
+
+def fetch_leads_raw_by_run(run_id: str) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT payload_json FROM leads_raw WHERE run_id = ?",
+            (run_id,),
+        ).fetchall()
+    return [json.loads(r["payload_json"]) for r in rows]
+
+
+def count_leads_raw_between(start_ts: str, end_ts: str) -> int:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT COUNT(*) AS cnt FROM leads_raw WHERE fetched_at BETWEEN ? AND ?",
+            (start_ts, end_ts),
+        ).fetchone()
+    return int(row["cnt"] or 0)
+
+
+def list_leads_raw_sources_between(start_ts: str, end_ts: str) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT source, COUNT(*) AS cnt
+            FROM leads_raw
+            WHERE fetched_at BETWEEN ? AND ?
+            GROUP BY source
+            ORDER BY cnt DESC
+            """,
+            (start_ts, end_ts),
+        ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def upsert_leads_clean(leads: List[Dict[str, Any]]) -> None:
@@ -396,7 +588,7 @@ def create_run(params: Dict[str, Any]) -> str:
     with get_conn() as conn:
         conn.execute(
             """
-            INSERT INTO enrichment_runs
+            INSERT INTO runs
             (run_id, created_at, params_json, status, total_leads, enriched_count, errors_count)
             VALUES (?, ?, ?, ?, ?, ?, ?)
             """,
@@ -424,7 +616,7 @@ def update_run(run_id: str, **fields: Any) -> None:
     values.append(run_id)
     with get_conn() as conn:
         conn.execute(
-            f"UPDATE enrichment_runs SET {', '.join(keys)} WHERE run_id = ?",
+            f"UPDATE runs SET {', '.join(keys)} WHERE run_id = ?",
             values,
         )
 
@@ -432,7 +624,7 @@ def update_run(run_id: str, **fields: Any) -> None:
 def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
     with get_conn() as conn:
         rows = conn.execute(
-            "SELECT * FROM enrichment_runs ORDER BY created_at DESC LIMIT ?",
+            "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?",
             (limit,),
         ).fetchall()
     return [dict(row) for row in rows]
@@ -441,7 +633,7 @@ def list_runs(limit: int = 50) -> List[Dict[str, Any]]:
 def get_run(run_id: str) -> Optional[Dict[str, Any]]:
     with get_conn() as conn:
         row = conn.execute(
-            "SELECT * FROM enrichment_runs WHERE run_id = ?",
+            "SELECT * FROM runs WHERE run_id = ?",
             (run_id,),
         ).fetchone()
     return dict(row) if row else None
@@ -567,13 +759,304 @@ def record_export(filters: Dict[str, Any], row_count: int, file_path: str) -> st
     export_id = str(uuid4())
     with get_conn() as conn:
         conn.execute(
-            "INSERT INTO exports (export_id, created_at, filters_json, row_count, file_path) VALUES (?, ?, ?, ?, ?)",
+            """
+            INSERT INTO exports
+            (export_id, created_at, filters_json, row_count, file_path, kind, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
             (
                 export_id,
                 _utcnow(),
                 json.dumps(filters, ensure_ascii=False),
                 row_count,
                 file_path,
+                "local_export",
+                _utcnow(),
             ),
         )
     return export_id
+
+
+def create_casa_export(
+    run_id: str,
+    arquivo_uuid: str,
+    payload_fingerprint: str,
+    status: str = "created",
+    total_linhas: Optional[int] = None,
+) -> str:
+    export_id = str(uuid4())
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO exports (
+                export_id, created_at, run_id, arquivo_uuid, payload_fingerprint,
+                status, kind, total_linhas, updated_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                export_id,
+                _utcnow(),
+                run_id,
+                arquivo_uuid,
+                payload_fingerprint,
+                status,
+                "casa_export",
+                total_linhas,
+                _utcnow(),
+            ),
+        )
+    return export_id
+
+
+def update_casa_export(
+    arquivo_uuid: str,
+    **fields: Any,
+) -> None:
+    if not fields:
+        return
+    keys = []
+    values = []
+    for key, value in fields.items():
+        keys.append(f"{key}=?")
+        values.append(value)
+    values.append(arquivo_uuid)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE exports SET {', '.join(keys)} WHERE arquivo_uuid = ?",
+            values,
+        )
+
+
+def list_casa_exports(limit: int = 50) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM exports
+            WHERE kind = 'casa_export'
+            ORDER BY created_at DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_casa_export(arquivo_uuid: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM exports WHERE arquivo_uuid = ? AND kind = 'casa_export'",
+            (arquivo_uuid,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def record_run_step(
+    run_id: str,
+    step_name: str,
+    status: str,
+    started_at: Optional[str] = None,
+    ended_at: Optional[str] = None,
+    duration_ms: Optional[int] = None,
+    details: Optional[Dict[str, Any]] = None,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO run_steps
+            (run_id, step_name, status, started_at, ended_at, duration_ms, details_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                step_name,
+                status,
+                started_at,
+                ended_at,
+                duration_ms,
+                json.dumps(details or {}, ensure_ascii=False),
+            ),
+        )
+
+
+def fetch_run_steps(run_id: str) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM run_steps WHERE run_id = ? ORDER BY id ASC",
+            (run_id,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_api_call(
+    run_id: str,
+    step_name: str,
+    method: str,
+    url: str,
+    status_code: int,
+    duration_ms: int,
+    payload_fingerprint: Optional[str] = None,
+    request_id: Optional[str] = None,
+    response_excerpt: Optional[str] = None,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO api_calls (
+                run_id, step_name, method, url, status_code, duration_ms,
+                payload_fingerprint, request_id, response_excerpt, created_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                step_name,
+                method,
+                url,
+                status_code,
+                duration_ms,
+                payload_fingerprint,
+                request_id,
+                response_excerpt,
+                _utcnow(),
+            ),
+        )
+
+
+def fetch_api_calls(run_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        if run_id:
+            rows = conn.execute(
+                "SELECT * FROM api_calls WHERE run_id = ? ORDER BY id DESC LIMIT ?",
+                (run_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM api_calls ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_error(
+    run_id: str,
+    step_name: str,
+    error: str,
+    traceback_text: Optional[str] = None,
+    lead_id: Optional[str] = None,
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO errors (run_id, step_name, lead_id, error, traceback, created_at)
+            VALUES (?, ?, ?, ?, ?, ?)
+            """,
+            (run_id, step_name, lead_id, error, traceback_text, _utcnow()),
+        )
+
+
+def fetch_errors(run_id: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        if run_id:
+            rows = conn.execute(
+                "SELECT * FROM errors WHERE run_id = ? ORDER BY id DESC LIMIT ?",
+                (run_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM errors ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_export_snapshot(
+    run_id: Optional[str],
+    arquivo_uuid: str,
+    status: str,
+    quantidade: Optional[int],
+    quantidade_solicitada: Optional[int],
+    raw: Dict[str, Any],
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO exports_status_snapshots
+            (run_id, arquivo_uuid, status, quantidade, quantidade_solicitada, created_at, raw_json)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                arquivo_uuid,
+                status,
+                quantidade,
+                quantidade_solicitada,
+                _utcnow(),
+                json.dumps(raw, ensure_ascii=False),
+            ),
+        )
+
+
+def fetch_export_snapshots(arquivo_uuid: str, limit: int = 20) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            """
+            SELECT * FROM exports_status_snapshots
+            WHERE arquivo_uuid = ?
+            ORDER BY id DESC
+            LIMIT ?
+            """,
+            (arquivo_uuid, limit),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def fetch_recent_export_snapshots(limit: int = 50) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM exports_status_snapshots ORDER BY id DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def record_export_file(
+    arquivo_uuid: str,
+    run_id: Optional[str],
+    file_path: str,
+    file_size: int,
+    file_hash: str,
+    link: Optional[str],
+    expires_at: Optional[str],
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO exports_files
+            (arquivo_uuid, run_id, file_path, file_size, file_hash, link, expires_at, downloaded_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                arquivo_uuid,
+                run_id,
+                file_path,
+                file_size,
+                file_hash,
+                link,
+                expires_at,
+                _utcnow(),
+            ),
+        )
+
+
+def fetch_export_files(arquivo_uuid: Optional[str] = None, limit: int = 50) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        if arquivo_uuid:
+            rows = conn.execute(
+                "SELECT * FROM exports_files WHERE arquivo_uuid = ? ORDER BY id DESC LIMIT ?",
+                (arquivo_uuid, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM exports_files ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
