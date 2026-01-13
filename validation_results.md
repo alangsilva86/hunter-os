@@ -2,6 +2,15 @@
 
 ## Status: ✅ FUNCIONANDO CORRETAMENTE
 
+## Atualização - Novas Funcionalidades Validadas
+
+1. **Resumo da Busca** - Exibe filtros aplicados (UF, MEI, telefone, e-mail, score e enriquecimento)
+2. **Paginação + Limite Visual** - Navegação por páginas em listas grandes
+3. **Exportação Configurável** - Seleção de colunas no CSV
+4. **Cache Local** - Botão para carregar empresas cacheadas
+5. **Enriquecimento Web (opcional)** - Busca de site/redes para melhorar score
+6. **Score ICP Alinhado ao README** - Base 50 + sinais de contato e CNAE
+
 ### Funcionalidades Validadas:
 
 1. **Interface Streamlit** - Carregada com sucesso

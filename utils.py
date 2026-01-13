@@ -7,17 +7,25 @@ import re
 import time
 import json
 import hashlib
-import sqlite3
 import logging
-from pathlib import Path
 from typing import Optional, Dict, List, Any
 from datetime import datetime, timedelta
 
 import requests
 import backoff
 import phonenumbers
-from phonenumbers import carrier, geocoder, PhoneNumberType
+from phonenumbers import PhoneNumberType
 from bs4 import BeautifulSoup
+from data_sources import DataCache, DEFAULT_CACHE_TTL_HOURS
+from lead_processing import (
+    normalizar_nome as normalizar_nome_padrao,
+    formatar_telefone as formatar_telefone_padrao,
+    limpar_cnpj as limpar_cnpj_padrao,
+    formatar_cnpj as formatar_cnpj_padrao,
+    calcular_score_icp as calcular_score_icp_padrao,
+    classificar_score_icp as classificar_score_icp_padrao,
+    email_dominio_proprio
+)
 
 # Configuração de logging
 logging.basicConfig(
@@ -59,105 +67,30 @@ NATUREZAS_VALIDAS = ["LTDA", "S.A.", "S/A", "EIRELI", "SOCIEDADE", "LIMITADA"]
 # ============================================================================
 
 class CacheManager:
-    """Gerenciador de cache local usando SQLite"""
+    """Gerenciador de cache unificado (wrapper do DataCache)"""
     
-    def __init__(self, db_path: str = "cache.db"):
-        self.db_path = db_path
-        self._init_db()
-    
-    def _init_db(self):
-        """Inicializa o banco de dados de cache"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS api_cache (
-                key TEXT PRIMARY KEY,
-                data TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                expires_at TIMESTAMP
-            )
-        ''')
-        
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS empresas (
-                cnpj TEXT PRIMARY KEY,
-                data TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
+    def __init__(self, db_path: str = "hunter_cache.db", ttl_hours: int = DEFAULT_CACHE_TTL_HOURS):
+        self.cache = DataCache(db_path=db_path, ttl_hours=ttl_hours)
     
     def get(self, key: str) -> Optional[Dict]:
         """Recupera dados do cache"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            SELECT data FROM api_cache 
-            WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)
-        ''', (key, datetime.now()))
-        
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return json.loads(result[0])
-        return None
+        return self.cache.get_cache(key)
     
-    def set(self, key: str, data: Dict, ttl_hours: int = 24):
+    def set(self, key: str, data: Dict, ttl_hours: int = DEFAULT_CACHE_TTL_HOURS):
         """Armazena dados no cache"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        expires_at = datetime.now() + timedelta(hours=ttl_hours)
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO api_cache (key, data, expires_at)
-            VALUES (?, ?, ?)
-        ''', (key, json.dumps(data, ensure_ascii=False), expires_at))
-        
-        conn.commit()
-        conn.close()
+        self.cache.set_cache(key, data, ttl_hours=ttl_hours)
     
-    def save_empresa(self, cnpj: str, data: Dict):
+    def save_empresa(self, cnpj: str, data: Dict, fonte: str = "api"):
         """Salva dados de uma empresa"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('''
-            INSERT OR REPLACE INTO empresas (cnpj, data)
-            VALUES (?, ?)
-        ''', (cnpj, json.dumps(data, ensure_ascii=False)))
-        
-        conn.commit()
-        conn.close()
+        self.cache.save_empresa(cnpj, data, fonte=fonte)
     
     def get_empresa(self, cnpj: str) -> Optional[Dict]:
         """Recupera dados de uma empresa"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT data FROM empresas WHERE cnpj = ?', (cnpj,))
-        result = cursor.fetchone()
-        conn.close()
-        
-        if result:
-            return json.loads(result[0])
-        return None
+        return self.cache.get_empresa(cnpj)
     
-    def get_all_empresas(self) -> List[Dict]:
+    def get_all_empresas(self, limit: int = None) -> List[Dict]:
         """Recupera todas as empresas do cache"""
-        conn = sqlite3.connect(self.db_path)
-        cursor = conn.cursor()
-        
-        cursor.execute('SELECT data FROM empresas')
-        results = cursor.fetchall()
-        conn.close()
-        
-        return [json.loads(r[0]) for r in results]
+        return self.cache.get_all_empresas(limit=limit)
 
 # ============================================================================
 # EXTRAÇÃO DE DADOS (APIs)
@@ -247,22 +180,7 @@ class DataTransformer:
     @staticmethod
     def normalizar_nome(nome: str) -> str:
         """Normaliza nome para Title Case"""
-        if not nome:
-            return ""
-        
-        # Palavras que devem ficar em minúsculo
-        palavras_minusculas = {'de', 'da', 'do', 'das', 'dos', 'e', 'em', 'para'}
-        
-        palavras = nome.lower().split()
-        resultado = []
-        
-        for i, palavra in enumerate(palavras):
-            if i == 0 or palavra not in palavras_minusculas:
-                resultado.append(palavra.capitalize())
-            else:
-                resultado.append(palavra)
-        
-        return ' '.join(resultado)
+        return normalizar_nome_padrao(nome)
     
     @staticmethod
     def formatar_telefone(telefone: str, ddd_padrao: str = "44") -> str:
@@ -283,12 +201,7 @@ class DataTransformer:
             numeros = ddd_padrao + numeros
         
         # Formata
-        if len(numeros) == 10:
-            return f"({numeros[:2]}) {numeros[2:6]}-{numeros[6:]}"
-        elif len(numeros) == 11:
-            return f"({numeros[:2]}) {numeros[2:7]}-{numeros[7:]}"
-        
-        return telefone
+        return formatar_telefone_padrao(numeros)
     
     @staticmethod
     def validar_telefone_tipo(telefone: str) -> Dict[str, Any]:
@@ -338,15 +251,12 @@ class DataTransformer:
     @staticmethod
     def limpar_cnpj(cnpj: str) -> str:
         """Remove formatação do CNPJ"""
-        return re.sub(r'\D', '', str(cnpj))
+        return limpar_cnpj_padrao(cnpj)
     
     @staticmethod
     def formatar_cnpj(cnpj: str) -> str:
         """Formata CNPJ para XX.XXX.XXX/XXXX-XX"""
-        numeros = re.sub(r'\D', '', str(cnpj))
-        if len(numeros) == 14:
-            return f"{numeros[:2]}.{numeros[2:5]}.{numeros[5:8]}/{numeros[8:12]}-{numeros[12:]}"
-        return cnpj
+        return formatar_cnpj_padrao(cnpj)
     
     @staticmethod
     def filtrar_por_porte(empresa: Dict) -> bool:
@@ -405,11 +315,7 @@ class DataTransformer:
         email = empresa.get('email', '') or ''
         
         # Verifica domínio próprio
-        dominio_proprio = False
-        if email and '@' in email:
-            dominio = email.split('@')[1].lower()
-            dominios_genericos = ['gmail.com', 'hotmail.com', 'outlook.com', 'yahoo.com', 'bol.com.br', 'uol.com.br']
-            dominio_proprio = dominio not in dominios_genericos
+        dominio_proprio = email_dominio_proprio(email)
         
         # Monta endereço completo
         endereco_parts = [
@@ -426,7 +332,7 @@ class DataTransformer:
         cnae_principal = empresa.get('cnae_fiscal', '') or empresa.get('cnae_fiscal_principal', '')
         cnae_descricao = empresa.get('cnae_fiscal_descricao', '') or ''
         
-        return {
+        empresa_final = {
             'cnpj': self.formatar_cnpj(empresa.get('cnpj', '')),
             'cnpj_limpo': self.limpar_cnpj(empresa.get('cnpj', '')),
             'razao_social': self.normalizar_nome(empresa.get('razao_social', '')),
@@ -452,8 +358,14 @@ class DataTransformer:
             'instagram': '',
             'linkedin': '',
             'tem_formulario_contato': False,
-            'icp_score': 0
+            'icp_score': 0,
+            'classificacao': ''
         }
+        
+        empresa_final['icp_score'] = calcular_score_icp_padrao(empresa_final)
+        empresa_final['classificacao'] = classificar_score_icp_padrao(empresa_final['icp_score'])
+        
+        return empresa_final
 
 # ============================================================================
 # ENRIQUECIMENTO DE DADOS
@@ -598,57 +510,15 @@ class DataEnricher:
 class ICPScorer:
     """Classe para cálculo de score ICP"""
     
-    # CNAEs de serviços (dor operacional alta)
-    CNAES_SERVICOS = ['8211', '8219', '8220', '8291', '6910', '6920']
-    
     @classmethod
     def calcular_score(cls, empresa: Dict) -> int:
-        """
-        Calcula score ICP (0-100)
-        
-        Critérios:
-        - Base: 50 pontos
-        - Tem Site/Instagram validado: +20 pontos
-        - Tem telefone celular (WhatsApp provável): +15 pontos
-        - CNAE é "Serviços" (dor operacional alta): +15 pontos
-        - Email não é @gmail/@hotmail (domínio próprio): +10 pontos
-        """
-        score = 50  # Base
-        
-        # Site ou Instagram validado (+20)
-        if empresa.get('site') or empresa.get('instagram'):
-            score += 20
-        
-        # Telefone celular / WhatsApp provável (+15)
-        if empresa.get('telefone_celular') or empresa.get('whatsapp_provavel'):
-            score += 15
-        
-        # CNAE de serviços (+15)
-        cnae = str(empresa.get('cnae_principal', ''))[:4]
-        if cnae in cls.CNAES_SERVICOS:
-            score += 15
-        
-        # Domínio próprio no email (+10)
-        if empresa.get('dominio_proprio'):
-            score += 10
-        
-        # Bônus: tem formulário de contato (+5)
-        if empresa.get('tem_formulario_contato'):
-            score += 5
-        
-        return min(score, 100)  # Cap em 100
+        """Calcula score ICP (0-100) alinhado ao README"""
+        return calcular_score_icp_padrao(empresa)
     
     @classmethod
     def classificar_lead(cls, score: int) -> str:
         """Classifica o lead baseado no score"""
-        if score >= 85:
-            return "🔥 Hot Lead"
-        elif score >= 70:
-            return "⭐ Qualificado"
-        elif score >= 55:
-            return "📊 Potencial"
-        else:
-            return "❄️ Frio"
+        return classificar_score_icp_padrao(score)
 
 # ============================================================================
 # GERADOR DE DADOS DE EXEMPLO

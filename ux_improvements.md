@@ -1,5 +1,15 @@
 # Hunter OS v2.0 - Melhorias de UX/UI
 
+## Atualização - Melhorias Recentes
+
+### ✅ Ajustes Implementados
+- Resumo da busca com filtros aplicados (UF, MEI, telefone, e-mail, score e enriquecimento)
+- Paginação e limite visual para listas grandes
+- Seleção de colunas na exportação CSV
+- Métricas de qualidade para bases grandes
+- Botão para carregar empresas do cache local
+- Enriquecimento web opcional via busca de site/redes sociais
+
 ## Validação Realizada em 13/01/2026
 
 ### ✅ Melhorias Implementadas

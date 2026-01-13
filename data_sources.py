@@ -3,15 +3,16 @@ Hunter OS - Módulo de Fontes de Dados Reais
 Integração com API Casa dos Dados + APIs públicas para enriquecimento
 """
 
-import re
+import os
 import time
 import json
 import logging
 import sqlite3
 import requests
+import backoff
 from typing import Optional, Dict, List, Any, Tuple, Callable
 from datetime import datetime, timedelta
-from urllib.parse import urlencode, quote
+from lead_processing import limpar_digitos
 
 # Configuração de logging
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
@@ -21,8 +22,8 @@ logger = logging.getLogger(__name__)
 # CONFIGURAÇÕES DAS APIs
 # ============================================================================
 
-# API Key da Casa dos Dados
-CASA_DOS_DADOS_API_KEY = "0df25ccd30a2c600a2cd6743653f07a60d5c14596cff32c581160557f5efc1fa473f4fa76ca8a3f6d5e9dfe8a3bead2fb13b85d3af145cb38dbc53d481a3a3ab"
+# API Key da Casa dos Dados (configurada via env ou Streamlit secrets)
+DEFAULT_CACHE_TTL_HOURS = 24
 
 API_CONFIG = {
     'casa_dos_dados': {
@@ -67,12 +68,30 @@ CIDADES_DISPONIVEIS = [
 # CACHE DE DADOS
 # ============================================================================
 
+def _get_streamlit_secret(key: str) -> Optional[str]:
+    try:
+        import streamlit as st
+        return st.secrets.get(key)
+    except Exception:
+        return None
+
+def resolve_casa_dos_dados_api_key() -> Optional[str]:
+    """Resolve API key via env ou Streamlit secrets"""
+    return (
+        os.getenv("CASA_DOS_DADOS_API_KEY")
+        or os.getenv("HUNTER_OS_CASA_DOS_DADOS_API_KEY")
+        or _get_streamlit_secret("CASA_DOS_DADOS_API_KEY")
+        or _get_streamlit_secret("casa_dos_dados_api_key")
+    )
+
 class DataCache:
     """Gerenciador de cache para dados de empresas"""
     
-    def __init__(self, db_path: str = "hunter_cache.db"):
+    def __init__(self, db_path: str = "hunter_cache.db", ttl_hours: int = DEFAULT_CACHE_TTL_HOURS):
         self.db_path = db_path
+        self.ttl_hours = ttl_hours
         self._init_db()
+        self.purge_expired()
     
     def _init_db(self):
         """Inicializa o banco de dados"""
@@ -88,6 +107,15 @@ class DataCache:
                 updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
             )
         ''')
+
+        cursor.execute('''
+            CREATE TABLE IF NOT EXISTS api_cache (
+                key TEXT PRIMARY KEY,
+                data TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                expires_at TIMESTAMP
+            )
+        ''')
         
         cursor.execute('''
             CREATE TABLE IF NOT EXISTS buscas (
@@ -99,23 +127,47 @@ class DataCache:
         ''')
         
         cursor.execute('CREATE INDEX IF NOT EXISTS idx_empresas_cnpj ON empresas(cnpj)')
+        cursor.execute('CREATE INDEX IF NOT EXISTS idx_api_cache_key ON api_cache(key)')
         
         conn.commit()
         conn.close()
-    
-    def get_empresa(self, cnpj: str) -> Optional[Dict]:
-        """Recupera empresa do cache"""
-        cnpj_limpo = re.sub(r'\D', '', cnpj)
+
+    def purge_expired(self):
+        """Remove itens expirados do cache"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT dados FROM empresas WHERE cnpj = ?', (cnpj_limpo,))
+        cursor.execute(
+            "DELETE FROM api_cache WHERE expires_at IS NOT NULL AND expires_at <= ?",
+            (datetime.now(),)
+        )
+        if self.ttl_hours:
+            cursor.execute(
+                "DELETE FROM empresas WHERE updated_at < datetime('now', ?)",
+                (f"-{self.ttl_hours} hours",)
+            )
+        conn.commit()
+        conn.close()
+    
+    def get_empresa(self, cnpj: str, max_age_hours: Optional[int] = None) -> Optional[Dict]:
+        """Recupera empresa do cache respeitando TTL"""
+        cnpj_limpo = limpar_digitos(cnpj)
+        ttl = self.ttl_hours if max_age_hours is None else max_age_hours
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        if ttl:
+            cursor.execute(
+                "SELECT dados FROM empresas WHERE cnpj = ? AND updated_at >= datetime('now', ?)",
+                (cnpj_limpo, f"-{ttl} hours")
+            )
+        else:
+            cursor.execute('SELECT dados FROM empresas WHERE cnpj = ?', (cnpj_limpo,))
         result = cursor.fetchone()
         conn.close()
         return json.loads(result[0]) if result else None
     
     def save_empresa(self, cnpj: str, dados: Dict, fonte: str = "api"):
         """Salva empresa no cache"""
-        cnpj_limpo = re.sub(r'\D', '', cnpj)
+        cnpj_limpo = limpar_digitos(cnpj)
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         cursor.execute('''
@@ -130,7 +182,7 @@ class DataCache:
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         for emp in empresas:
-            cnpj = re.sub(r'\D', '', emp.get('cnpj', ''))
+            cnpj = limpar_digitos(emp.get('cnpj', ''))
             if cnpj:
                 cursor.execute('''
                     INSERT OR REPLACE INTO empresas (cnpj, dados, fonte, updated_at)
@@ -139,15 +191,28 @@ class DataCache:
         conn.commit()
         conn.close()
     
-    def get_all_empresas(self, limit: int = None) -> List[Dict]:
-        """Recupera todas as empresas do cache"""
+    def get_all_empresas(self, limit: int = None, max_age_hours: Optional[int] = None) -> List[Dict]:
+        """Recupera todas as empresas do cache respeitando TTL"""
+        ttl = self.ttl_hours if max_age_hours is None else max_age_hours
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
         
-        if limit:
-            cursor.execute('SELECT dados FROM empresas ORDER BY updated_at DESC LIMIT ?', (limit,))
+        if ttl:
+            if limit:
+                cursor.execute(
+                    "SELECT dados FROM empresas WHERE updated_at >= datetime('now', ?) ORDER BY updated_at DESC LIMIT ?",
+                    (f"-{ttl} hours", limit)
+                )
+            else:
+                cursor.execute(
+                    "SELECT dados FROM empresas WHERE updated_at >= datetime('now', ?) ORDER BY updated_at DESC",
+                    (f"-{ttl} hours",)
+                )
         else:
-            cursor.execute('SELECT dados FROM empresas ORDER BY updated_at DESC')
+            if limit:
+                cursor.execute('SELECT dados FROM empresas ORDER BY updated_at DESC LIMIT ?', (limit,))
+            else:
+                cursor.execute('SELECT dados FROM empresas ORDER BY updated_at DESC')
         
         results = cursor.fetchall()
         conn.close()
@@ -157,7 +222,13 @@ class DataCache:
         """Conta total de empresas no cache"""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        cursor.execute('SELECT COUNT(*) FROM empresas')
+        if self.ttl_hours:
+            cursor.execute(
+                "SELECT COUNT(*) FROM empresas WHERE updated_at >= datetime('now', ?)",
+                (f"-{self.ttl_hours} hours",)
+            )
+        else:
+            cursor.execute('SELECT COUNT(*) FROM empresas')
         count = cursor.fetchone()[0]
         conn.close()
         return count
@@ -173,6 +244,30 @@ class DataCache:
         conn.commit()
         conn.close()
 
+    def get_cache(self, key: str) -> Optional[Dict]:
+        """Recupera dados do cache genérico"""
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "SELECT data FROM api_cache WHERE key = ? AND (expires_at IS NULL OR expires_at > ?)",
+            (key, datetime.now())
+        )
+        result = cursor.fetchone()
+        conn.close()
+        return json.loads(result[0]) if result else None
+
+    def set_cache(self, key: str, data: Dict, ttl_hours: int = DEFAULT_CACHE_TTL_HOURS):
+        """Salva dados no cache genérico"""
+        expires_at = datetime.now() + timedelta(hours=ttl_hours) if ttl_hours else None
+        conn = sqlite3.connect(self.db_path)
+        cursor = conn.cursor()
+        cursor.execute(
+            "INSERT OR REPLACE INTO api_cache (key, data, expires_at) VALUES (?, ?, ?)",
+            (key, json.dumps(data, ensure_ascii=False), expires_at)
+        )
+        conn.commit()
+        conn.close()
+
 # ============================================================================
 # CLIENTE DA API CASA DOS DADOS
 # ============================================================================
@@ -180,16 +275,18 @@ class DataCache:
 class CasaDosDadosClient:
     """Cliente para API da Casa dos Dados"""
     
-    def __init__(self, api_key: str = CASA_DOS_DADOS_API_KEY):
-        self.api_key = api_key
+    def __init__(self, api_key: Optional[str] = None):
+        self.api_key = api_key or resolve_casa_dos_dados_api_key()
         self.base_url = API_CONFIG['casa_dos_dados']['base_url']
         self.session = requests.Session()
-        self.session.headers.update({
-            'api-key': self.api_key,
+        headers = {
             'Content-Type': 'application/json',
             'Accept': 'application/json',
             'User-Agent': 'HunterOS/1.0'
-        })
+        }
+        if self.api_key:
+            headers['api-key'] = self.api_key
+        self.session.headers.update(headers)
         self.last_request_time = 0
     
     def _rate_limit(self):
@@ -200,8 +297,30 @@ class CasaDosDadosClient:
             time.sleep(min_interval - elapsed)
         self.last_request_time = time.time()
     
+    class RetryableAPIError(Exception):
+        """Erro que aciona retry/backoff"""
+        pass
+
+    @backoff.on_exception(
+        backoff.expo,
+        (requests.exceptions.RequestException, RetryableAPIError),
+        max_tries=3,
+        jitter=backoff.full_jitter
+    )
+    def _post_pesquisa(self, payload: Dict, tipo_resultado: str):
+        self._rate_limit()
+        response = self.session.post(
+            f"{self.base_url}?tipo_resultado={tipo_resultado}",
+            json=payload,
+            timeout=API_CONFIG['casa_dos_dados']['timeout']
+        )
+        if response.status_code in {429, 500, 502, 503, 504}:
+            raise self.RetryableAPIError(f"HTTP {response.status_code}")
+        return response
+
     def pesquisar_empresas(
         self,
+        cnpjs: List[str] = None,
         municipios: List[str] = None,
         uf: str = "PR",
         cnaes: List[str] = None,
@@ -219,7 +338,8 @@ class CasaDosDadosClient:
         Returns:
             Tuple[List[Dict], int, str]: (empresas, total, mensagem_erro)
         """
-        self._rate_limit()
+        if not self.api_key:
+            return [], 0, "API key não configurada. Defina CASA_DOS_DADOS_API_KEY em env ou st.secrets."
         
         # Monta o payload
         payload = {
@@ -227,6 +347,10 @@ class CasaDosDadosClient:
             "limite": min(limite, 1000),
             "pagina": pagina
         }
+
+        # Filtro por CNPJs específicos
+        if cnpjs:
+            payload["cnpj"] = [limpar_digitos(c) for c in cnpjs if limpar_digitos(c)]
         
         # Adiciona UF
         if uf:
@@ -256,11 +380,7 @@ class CasaDosDadosClient:
         try:
             logger.info(f"Buscando empresas: {json.dumps(payload, ensure_ascii=False)[:200]}...")
             
-            response = self.session.post(
-                f"{self.base_url}?tipo_resultado={tipo_resultado}",
-                json=payload,
-                timeout=API_CONFIG['casa_dos_dados']['timeout']
-            )
+            response = self._post_pesquisa(payload, tipo_resultado)
             
             if response.status_code == 200:
                 data = response.json()
@@ -273,15 +393,16 @@ class CasaDosDadosClient:
                 logger.info(f"Encontradas {len(empresas_normalizadas)} empresas (total: {total})")
                 return empresas_normalizadas, total, None
             
-            elif response.status_code == 401:
+            if response.status_code == 401:
                 return [], 0, "API Key inválida ou expirada"
-            elif response.status_code == 403:
+            if response.status_code == 403:
                 return [], 0, "Acesso negado - verifique sua API Key"
-            elif response.status_code == 429:
+            if response.status_code == 429:
                 return [], 0, "Limite de requisições excedido - aguarde alguns minutos"
-            else:
-                return [], 0, f"Erro na API: {response.status_code} - {response.text[:200]}"
+            return [], 0, f"Erro na API: {response.status_code} - {response.text[:200]}"
                 
+        except self.RetryableAPIError as e:
+            return [], 0, f"Erro temporário na API: {str(e)}"
         except requests.exceptions.Timeout:
             return [], 0, "Timeout na requisição - tente novamente"
         except requests.exceptions.RequestException as e:
@@ -342,14 +463,17 @@ class CasaDosDadosClient:
     
     def consultar_cnpj(self, cnpj: str) -> Optional[Dict]:
         """Consulta um CNPJ específico"""
-        cnpj_limpo = re.sub(r'\D', '', cnpj)
+        cnpj_limpo = limpar_digitos(cnpj)
+        if not cnpj_limpo:
+            return None
         empresas, total, erro = self.pesquisar_empresas(
+            cnpjs=[cnpj_limpo],
             limite=1,
             tipo_resultado="completo"
         )
-        # Para consulta específica, usar endpoint de consulta individual
-        # Por ora, retorna None se não encontrar
-        return None
+        if erro or not empresas:
+            return None
+        return empresas[0]
 
 # ============================================================================
 # BUSCADOR PRINCIPAL
@@ -368,8 +492,8 @@ class HunterSearcher:
         setores: List[str] = None,
         uf: str = "PR",
         excluir_mei: bool = True,
-        com_telefone: bool = True,
-        com_email: bool = True,
+        com_telefone: bool = False,
+        com_email: bool = False,
         limite: int = 100,
         callback_progresso: Callable = None
     ) -> Tuple[List[Dict], Dict]:
@@ -397,7 +521,11 @@ class HunterSearcher:
             'erros': [],
             'fonte': 'Casa dos Dados API',
             'cidades': ', '.join(cidades) if cidades else 'Todas',
-            'setores': ', '.join(setores) if setores else 'Todos'
+            'setores': ', '.join(setores) if setores else 'Todos',
+            'uf': uf,
+            'excluir_mei': excluir_mei,
+            'com_telefone': com_telefone,
+            'com_email': com_email
         }
         
         # Converte setores para CNAEs
@@ -405,7 +533,7 @@ class HunterSearcher:
         if setores:
             for setor in setores:
                 if setor in SETORES_CNAE:
-                    cnaes.extend(SETORES_CNAE[setor])
+                    cnaes.extend([limpar_digitos(c) for c in SETORES_CNAE[setor]])
         
         todas_empresas = []
         pagina = 1
