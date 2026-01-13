@@ -78,6 +78,10 @@ def _process_leads(
                 "provider_error_count": 0,
                 "skipped_due_to_provider_error": False,
             },
+            "paused_provider_limit": False,
+            "planned_to_enrich": 0,
+            "remaining_to_enrich": 0,
+            "strategy": "canceled",
         }
 
     _update_status(run_id, "scoring_v1")
@@ -101,15 +105,86 @@ def _process_leads(
     sorted_clean = sorted(cleaned, key=lambda x: x.get("score_v1", 0), reverse=True)
     top_n = max(1, int(len(sorted_clean) * top_pct / 100)) if sorted_clean else 0
     to_enrich = sorted_clean[:top_n]
+    planned_to_enrich = len(to_enrich)
+    strategy = params.get("enrich_strategy") or "default"
+
+    safe_limit = params.get("safe_enrich_limit")
+    if safe_limit:
+        safe_limit = int(safe_limit)
+        if safe_limit > 0:
+            to_enrich = to_enrich[:safe_limit]
+            planned_to_enrich = len(to_enrich)
+            strategy = f"safe_limit_{safe_limit}"
+
+    cache_only = bool(params.get("cache_only"))
+    if cache_only and to_enrich:
+        cutoff = time.time() - (params.get("cache_ttl_hours", 24) * 3600)
+        cached = storage.fetch_enrichments_by_cnpjs([lead.get("cnpj") for lead in to_enrich])
+        fresh = []
+        for lead in to_enrich:
+            cached_item = cached.get(lead.get("cnpj"))
+            enriched_at = cached_item.get("enriched_at") if cached_item else None
+            if enriched_at:
+                try:
+                    ts = time.mktime(time.strptime(enriched_at, "%Y-%m-%d %H:%M:%S"))
+                except Exception:
+                    ts = 0
+                if ts >= cutoff:
+                    fresh.append(lead)
+        to_enrich = fresh
+        planned_to_enrich = len(to_enrich)
+        strategy = "cache_only"
+
+    storage.update_run(
+        run_id,
+        planned_to_enrich=planned_to_enrich,
+        remaining_to_enrich=planned_to_enrich,
+        strategy=strategy,
+    )
+    _log_info(
+        run_id,
+        "enrich_plan",
+        "Planejamento de enriquecimento definido.",
+        planned_to_enrich=planned_to_enrich,
+        strategy=strategy,
+    )
+    if safe_limit:
+        _log_info(
+            run_id,
+            "enrich_safe_mode",
+            "Modo seguro ativo: limitando o enriquecimento.",
+            safe_limit=safe_limit,
+        )
+    if cache_only:
+        _log_info(
+            run_id,
+            "enrich_cache_only",
+            "Modo seguro ativo: somente cache (sem chamadas externas).",
+            cache_ttl_hours=params.get("cache_ttl_hours", 24),
+        )
 
     enriched_results: List[Dict[str, Any]] = []
     enrich_stats = {
         "provider_error": None,
         "provider_error_count": 0,
         "skipped_due_to_provider_error": False,
+        "processed_count": 0,
+        "errors_count": 0,
+        "cache_hits": 0,
+        "avg_fetch_ms": 0,
+        "provider_limit_hit": False,
+        "provider_http_status": None,
+        "provider_message": None,
+        "provider_backoff_seconds": None,
     }
     if params.get("enable_enrichment") and to_enrich:
-        _update_status(run_id, "enriching")
+        _update_status(
+            run_id,
+            "enriching",
+            planned_to_enrich=planned_to_enrich,
+            remaining_to_enrich=planned_to_enrich,
+            strategy=strategy,
+        )
         _log_info(
             run_id,
             "enrichment_start",
@@ -135,10 +210,13 @@ def _process_leads(
         for item in enriched_results:
             storage.upsert_enrichment(item.get("cnpj"), item)
 
+        step_status = "completed"
+        if enrich_stats.get("provider_limit_hit"):
+            step_status = "paused_provider_limit"
         storage.record_run_step(
             run_id=run_id,
             step_name="enriching",
-            status="completed",
+            status=step_status,
             started_at=time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(step_start)),
             ended_at=storage._utcnow(),
             duration_ms=int((time.time() - step_start) * 1000),
@@ -149,6 +227,15 @@ def _process_leads(
                 "provider_error": enrich_stats.get("provider_error"),
                 "provider_error_count": enrich_stats.get("provider_error_count"),
                 "skipped_due_to_provider_error": enrich_stats.get("skipped_due_to_provider_error"),
+                "processed_count": enrich_stats.get("processed_count"),
+                "errors_count": enrich_stats.get("errors_count"),
+                "cache_hits": enrich_stats.get("cache_hits"),
+                "avg_fetch_ms": enrich_stats.get("avg_fetch_ms"),
+                "provider_http_status": enrich_stats.get("provider_http_status"),
+                "provider_message": enrich_stats.get("provider_message"),
+                "provider_backoff_seconds": enrich_stats.get("provider_backoff_seconds"),
+                "planned_to_enrich": planned_to_enrich,
+                "strategy": strategy,
             },
         )
         _log_info(
@@ -159,6 +246,9 @@ def _process_leads(
             alvo_enriquecimento=len(to_enrich),
             provider=params.get("provider"),
             provider_error=enrich_stats.get("provider_error"),
+            cache_hits=enrich_stats.get("cache_hits"),
+            errors_count=enrich_stats.get("errors_count"),
+            avg_fetch_ms=enrich_stats.get("avg_fetch_ms"),
         )
         if enrich_stats.get("provider_error"):
             _log_warning(
@@ -169,9 +259,28 @@ def _process_leads(
                 error=enrich_stats.get("provider_error"),
             )
 
+        if enrich_stats.get("provider_limit_hit"):
+            remaining = max(planned_to_enrich - len(enriched_results), 0)
+            return {
+                "enriched_results": enriched_results,
+                "enrich_stats": enrich_stats,
+                "paused_provider_limit": True,
+                "planned_to_enrich": planned_to_enrich,
+                "remaining_to_enrich": remaining,
+                "strategy": strategy,
+            }
+
     if cancel_event.is_set():
         _update_status(run_id, "canceled")
-        return {"enriched_results": enriched_results, "enrich_stats": enrich_stats}
+        remaining = max(planned_to_enrich - len(enriched_results), 0)
+        return {
+            "enriched_results": enriched_results,
+            "enrich_stats": enrich_stats,
+            "paused_provider_limit": False,
+            "planned_to_enrich": planned_to_enrich,
+            "remaining_to_enrich": remaining,
+            "strategy": strategy,
+        }
 
     _update_status(run_id, "scoring_v2")
     step_start = time.time()
@@ -198,7 +307,90 @@ def _process_leads(
         "Score v2 concluido.",
         leads=len(cleaned),
     )
-    return {"enriched_results": enriched_results, "enrich_stats": enrich_stats}
+    remaining = max(planned_to_enrich - len(enriched_results), 0)
+    return {
+        "enriched_results": enriched_results,
+        "enrich_stats": enrich_stats,
+        "paused_provider_limit": False,
+        "planned_to_enrich": planned_to_enrich,
+        "remaining_to_enrich": remaining,
+        "strategy": strategy,
+    }
+
+
+def _finalize_run(
+    run_id: str,
+    process_result: Dict[str, Any],
+    total_leads: int,
+    completion_message: str,
+) -> str:
+    enriched_results = process_result.get("enriched_results", [])
+    enrich_stats = process_result.get("enrich_stats", {})
+    planned_to_enrich = int(process_result.get("planned_to_enrich") or 0)
+    remaining_to_enrich = int(process_result.get("remaining_to_enrich") or 0)
+    strategy = process_result.get("strategy")
+    error_total = int(enrich_stats.get("errors_count") or 0)
+    if enrich_stats.get("provider_error"):
+        error_total = max(error_total, 1)
+
+    if process_result.get("paused_provider_limit"):
+        _update_status(
+            run_id,
+            "paused_provider_limit",
+            enriched_count=len(enriched_results),
+            errors_count=error_total,
+            planned_to_enrich=planned_to_enrich,
+            remaining_to_enrich=remaining_to_enrich,
+            warning_reason="provider_rate_limit",
+            provider_http_status=enrich_stats.get("provider_http_status"),
+            provider_message=enrich_stats.get("provider_message"),
+            strategy=strategy,
+        )
+        _log_warning(
+            run_id,
+            "run_paused_provider",
+            "Run pausado por limite do provider.",
+            provider_http_status=enrich_stats.get("provider_http_status"),
+            provider_message=enrich_stats.get("provider_message"),
+            remaining_to_enrich=remaining_to_enrich,
+        )
+        return "paused_provider_limit"
+
+    status = "completed"
+    warning_reason = None
+    if enrich_stats.get("provider_error") or remaining_to_enrich > 0:
+        status = "completed_with_warnings"
+        warning_reason = "provider_error" if enrich_stats.get("provider_error") else "partial_enrichment"
+
+    _update_status(
+        run_id,
+        status,
+        enriched_count=len(enriched_results),
+        errors_count=error_total,
+        planned_to_enrich=planned_to_enrich,
+        remaining_to_enrich=remaining_to_enrich,
+        warning_reason=warning_reason,
+        provider_http_status=enrich_stats.get("provider_http_status"),
+        provider_message=enrich_stats.get("provider_message"),
+        strategy=strategy,
+    )
+    _log_info(
+        run_id,
+        "run_completed",
+        completion_message,
+        total_leads=total_leads,
+        enriched_count=len(enriched_results),
+        provider_error=enrich_stats.get("provider_error"),
+    )
+    if status == "completed_with_warnings":
+        _log_warning(
+            run_id,
+            "run_completed_with_warnings",
+            "Run finalizado com pendencias.",
+            warning_reason=warning_reason,
+            remaining_to_enrich=remaining_to_enrich,
+        )
+    return status
 
 
 def _run_pipeline(run_id: str, params: Dict[str, Any], cancel_event: threading.Event) -> None:
@@ -305,23 +497,7 @@ def _run_pipeline(run_id: str, params: Dict[str, Any], cancel_event: threading.E
             return
 
         process_result = _process_leads(run_id, params, leads_raw, cancel_event)
-        enriched_results = process_result.get("enriched_results", [])
-        enrich_stats = process_result.get("enrich_stats", {})
-
-        _update_status(
-            run_id,
-            "completed",
-            enriched_count=len(enriched_results),
-            errors_count=1 if enrich_stats.get("provider_error") else 0,
-        )
-        _log_info(
-            run_id,
-            "run_completed",
-            "Run concluido.",
-            total_leads=len(leads_raw),
-            enriched_count=len(enriched_results),
-            provider_error=enrich_stats.get("provider_error"),
-        )
+        _finalize_run(run_id, process_result, len(leads_raw), "Run concluido.")
     except data_sources.CasaDosDadosBalanceError as exc:
         storage.log_event(
             "error",
@@ -390,22 +566,7 @@ def _run_recovery(run_id: str, params: Dict[str, Any], arquivo_uuid: str, cancel
             return
 
         process_result = _process_leads(run_id, params, leads_raw, cancel_event)
-        enriched_results = process_result.get("enriched_results", [])
-        enrich_stats = process_result.get("enrich_stats", {})
-        _update_status(
-            run_id,
-            "completed",
-            enriched_count=len(enriched_results),
-            errors_count=1 if enrich_stats.get("provider_error") else 0,
-        )
-        _log_info(
-            run_id,
-            "run_completed",
-            "Recovery concluido.",
-            total_leads=len(leads_raw),
-            enriched_count=len(enriched_results),
-            provider_error=enrich_stats.get("provider_error"),
-        )
+        _finalize_run(run_id, process_result, len(leads_raw), "Recovery concluido.")
     except Exception as exc:
         storage.log_event("error", "run_failed", {"run_id": run_id, "error": str(exc)})
         storage.record_error(run_id, "recovery", str(exc), traceback.format_exc())
@@ -472,22 +633,7 @@ def _run_excel_import(run_id: str, params: Dict[str, Any], file_path: str, cance
             return
 
         process_result = _process_leads(run_id, params, leads_raw, cancel_event)
-        enriched_results = process_result.get("enriched_results", [])
-        enrich_stats = process_result.get("enrich_stats", {})
-        _update_status(
-            run_id,
-            "completed",
-            enriched_count=len(enriched_results),
-            errors_count=1 if enrich_stats.get("provider_error") else 0,
-        )
-        _log_info(
-            run_id,
-            "run_completed",
-            "Importacao Excel concluida.",
-            total_leads=len(leads_raw),
-            enriched_count=len(enriched_results),
-            provider_error=enrich_stats.get("provider_error"),
-        )
+        _finalize_run(run_id, process_result, len(leads_raw), "Importacao Excel concluida.")
     except Exception as exc:
         storage.log_event("error", "run_failed", {"run_id": run_id, "error": str(exc)})
         storage.record_error(run_id, "import_excel", str(exc), traceback.format_exc())
@@ -510,6 +656,25 @@ def start_excel_import(file_path: str, params: Dict[str, Any]) -> str:
     return run_id
 
 
+def _run_resume(run_id: str, params: Dict[str, Any], cancel_event: threading.Event) -> None:
+    try:
+        _log_info(
+            run_id,
+            "run_resume_start",
+            "Retomando run a partir do banco (sem nova consulta externa).",
+            run_type=params.get("run_type"),
+        )
+        leads_raw = storage.fetch_leads_raw_by_run(run_id)
+        if not leads_raw:
+            raise RuntimeError("Nenhum lead encontrado para retomar este run.")
+        process_result = _process_leads(run_id, params, leads_raw, cancel_event)
+        _finalize_run(run_id, process_result, len(leads_raw), "Run retomado e concluido.")
+    except Exception as exc:
+        storage.log_event("error", "run_failed", {"run_id": run_id, "error": str(exc)})
+        storage.record_error(run_id, "resume", str(exc), traceback.format_exc())
+        _update_status(run_id, "failed", errors_count=1)
+
+
 def resume_run(run_id: str) -> Optional[str]:
     if is_running(run_id):
         return run_id
@@ -517,8 +682,12 @@ def resume_run(run_id: str) -> Optional[str]:
     if not run:
         return None
     params = json.loads(run.get("params_json") or "{}")
+    run_type = str(params.get("run_type") or "standard")
+    if run_type == "export":
+        _log_warning(run_id, "run_resume_skipped", "Run de export nao pode ser retomado.")
+        return None
     cancel_event = threading.Event()
-    thread = threading.Thread(target=_run_pipeline, args=(run_id, params, cancel_event), daemon=True)
+    thread = threading.Thread(target=_run_resume, args=(run_id, params, cancel_event), daemon=True)
     _job_registry[run_id] = {
         "thread": thread,
         "cancel_event": cancel_event,

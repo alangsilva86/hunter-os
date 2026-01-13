@@ -45,12 +45,13 @@ Use `.env` ou export no shell:
 ```
 CASA_DOS_DADOS_API_KEY=...
 SERPER_API_KEY=...
-BUILTWITH_API_KEY=...
 SEARCH_PROVIDER=serper
 CACHE_TTL_HOURS=24
 CONCURRENCY=10
 TIMEOUT=5
 HUNTER_DB_PATH=hunter.db
+ENABLE_PLAYWRIGHT=0
+PLAYWRIGHT_TIMEOUT_MS=8000
 ```
 
 ### Export Casa dos Dados
@@ -72,7 +73,7 @@ streamlit run app.py
 - **Staging**: resultados brutos entram em `leads_raw` (idempotente por run).
 - **Cleaning**: normaliza telefones/emails, remove MEI, detecta contador-like, marca telefone repetido.
 - **Score v1**: define top X% para enriquecimento.
-- **Enrichment async**: busca site/redes via provider e detecta tecnologias por assinatura.
+- **Enrichment async**: busca site/redes via provider e detecta tecnologias por fingerprints (HTML/headers/cookies).
 - **Score v2**: usa dados de enriquecimento e flags para pontuacao final.
 - **Vault**: resultados enriquecidos ficam reutilizaveis em `enrichments`.
 

@@ -4,7 +4,7 @@ import json
 import os
 import re
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 import aiohttp
 
@@ -22,6 +22,11 @@ SOCIAL_BLOCKLIST = [
 
 class ProviderResponseError(RuntimeError):
     """Raised when a search provider returns a non-JSON or error response."""
+
+    def __init__(self, message: str, status_code: Optional[int] = None, payload: Optional[Dict[str, Any]] = None):
+        super().__init__(message)
+        self.status_code = status_code
+        self.payload = payload or {}
 
 
 def _redact_api_key(text: str) -> str:
@@ -42,16 +47,27 @@ class SearchProvider(ABC):
         text = await resp.text()
         if resp.status >= 400:
             excerpt = _redact_api_key(text).replace("\n", " ")[:200]
-            raise ProviderResponseError(f"{self.name} HTTP {resp.status}: {excerpt}")
+            payload: Dict[str, Any] = {}
+            try:
+                payload = json.loads(text)
+                message = payload.get("message") or payload.get("error") or excerpt
+            except json.JSONDecodeError:
+                message = excerpt
+            raise ProviderResponseError(
+                f"{self.name} HTTP {resp.status}: {message}",
+                status_code=resp.status,
+                payload=payload,
+            )
         try:
             return json.loads(text)
         except json.JSONDecodeError:
             excerpt = _redact_api_key(text).replace("\n", " ")[:200]
             if content_type:
                 raise ProviderResponseError(
-                    f"{self.name} resposta nao-JSON (content-type={content_type}): {excerpt}"
+                    f"{self.name} resposta nao-JSON (content-type={content_type}): {excerpt}",
+                    status_code=resp.status,
                 )
-            raise ProviderResponseError(f"{self.name} resposta nao-JSON: {excerpt}")
+            raise ProviderResponseError(f"{self.name} resposta nao-JSON: {excerpt}", status_code=resp.status)
 
     def _extract_links(self, data: Dict[str, Any]) -> List[str]:
         links: List[str] = []

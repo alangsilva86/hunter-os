@@ -136,10 +136,22 @@ def init_db() -> None:
                 status TEXT,
                 total_leads INTEGER,
                 enriched_count INTEGER,
-                errors_count INTEGER
+                errors_count INTEGER,
+                planned_to_enrich INTEGER,
+                remaining_to_enrich INTEGER,
+                warning_reason TEXT,
+                provider_http_status INTEGER,
+                provider_message TEXT,
+                strategy TEXT
             )
             """
         )
+        _ensure_column(conn, "runs", "planned_to_enrich", "INTEGER")
+        _ensure_column(conn, "runs", "remaining_to_enrich", "INTEGER")
+        _ensure_column(conn, "runs", "warning_reason", "TEXT")
+        _ensure_column(conn, "runs", "provider_http_status", "INTEGER")
+        _ensure_column(conn, "runs", "provider_message", "TEXT")
+        _ensure_column(conn, "runs", "strategy", "TEXT")
 
         cur.execute(
             """
@@ -190,12 +202,32 @@ def init_db() -> None:
                 has_form INTEGER,
                 tech_stack_json TEXT,
                 tech_score INTEGER,
+                tech_confidence INTEGER,
+                has_marketing INTEGER,
+                has_analytics INTEGER,
+                has_ecommerce INTEGER,
+                has_chat INTEGER,
+                signals_json TEXT,
+                fetched_url TEXT,
+                fetch_status INTEGER,
+                fetch_ms INTEGER,
+                rendered_used INTEGER,
                 contact_quality TEXT,
                 notes TEXT,
                 enriched_at TIMESTAMP
             )
             """
         )
+        _ensure_column(conn, "enrichments", "tech_confidence", "INTEGER")
+        _ensure_column(conn, "enrichments", "has_marketing", "INTEGER")
+        _ensure_column(conn, "enrichments", "has_analytics", "INTEGER")
+        _ensure_column(conn, "enrichments", "has_ecommerce", "INTEGER")
+        _ensure_column(conn, "enrichments", "has_chat", "INTEGER")
+        _ensure_column(conn, "enrichments", "signals_json", "TEXT")
+        _ensure_column(conn, "enrichments", "fetched_url", "TEXT")
+        _ensure_column(conn, "enrichments", "fetch_status", "INTEGER")
+        _ensure_column(conn, "enrichments", "fetch_ms", "INTEGER")
+        _ensure_column(conn, "enrichments", "rendered_used", "INTEGER")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_enrichments_run ON enrichments(run_id)")
 
         cur.execute(
@@ -546,9 +578,11 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
             INSERT INTO enrichments (
                 cnpj, run_id, site, instagram, linkedin_company,
                 linkedin_people_json, google_maps_url, has_contact_page,
-                has_form, tech_stack_json, tech_score, contact_quality,
-                notes, enriched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                has_form, tech_stack_json, tech_score, tech_confidence,
+                has_marketing, has_analytics, has_ecommerce, has_chat,
+                signals_json, fetched_url, fetch_status, fetch_ms,
+                rendered_used, contact_quality, notes, enriched_at
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cnpj) DO UPDATE SET
                 run_id=excluded.run_id,
                 site=excluded.site,
@@ -560,6 +594,16 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
                 has_form=excluded.has_form,
                 tech_stack_json=excluded.tech_stack_json,
                 tech_score=excluded.tech_score,
+                tech_confidence=excluded.tech_confidence,
+                has_marketing=excluded.has_marketing,
+                has_analytics=excluded.has_analytics,
+                has_ecommerce=excluded.has_ecommerce,
+                has_chat=excluded.has_chat,
+                signals_json=excluded.signals_json,
+                fetched_url=excluded.fetched_url,
+                fetch_status=excluded.fetch_status,
+                fetch_ms=excluded.fetch_ms,
+                rendered_used=excluded.rendered_used,
                 contact_quality=excluded.contact_quality,
                 notes=excluded.notes,
                 enriched_at=excluded.enriched_at
@@ -576,6 +620,16 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
                 int(bool(data.get("has_form"))),
                 json.dumps(data.get("tech_stack", {}), ensure_ascii=False),
                 data.get("tech_score"),
+                data.get("tech_confidence"),
+                int(bool(data.get("has_marketing"))),
+                int(bool(data.get("has_analytics"))),
+                int(bool(data.get("has_ecommerce"))),
+                int(bool(data.get("has_chat"))),
+                json.dumps(data.get("signals", {}), ensure_ascii=False),
+                data.get("fetched_url"),
+                data.get("fetch_status"),
+                data.get("fetch_ms"),
+                int(bool(data.get("rendered_used"))),
                 data.get("contact_quality"),
                 data.get("notes"),
                 data.get("enriched_at") or _utcnow(),
@@ -700,6 +754,8 @@ def query_enrichment_vault(
     min_score: Optional[int] = None,
     min_tech_score: Optional[int] = None,
     contact_quality: Optional[str] = None,
+    municipio: Optional[str] = None,
+    has_marketing: Optional[bool] = None,
     limit: int = 100,
     offset: int = 0,
 ) -> List[Dict[str, Any]]:
@@ -714,6 +770,12 @@ def query_enrichment_vault(
     if contact_quality:
         clauses.append("c.contact_quality = ?")
         params.append(contact_quality)
+    if municipio:
+        clauses.append("c.municipio = ?")
+        params.append(municipio)
+    if has_marketing is not None:
+        clauses.append("e.has_marketing = ?")
+        params.append(1 if has_marketing else 0)
 
     where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
     sql = (
