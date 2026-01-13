@@ -5,7 +5,7 @@ import os
 import hashlib
 import re
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
 from uuid import uuid4
 
@@ -70,14 +70,14 @@ def _format_duration(seconds: float) -> str:
 
 
 def _count_fresh_cache(enrichments: Dict[str, Dict[str, Any]], ttl_hours: int) -> int:
-    cutoff = datetime.utcnow() - timedelta(hours=ttl_hours)
+    cutoff = datetime.now(timezone.utc) - timedelta(hours=ttl_hours)
     fresh = 0
     for item in enrichments.values():
         enriched_at = item.get("enriched_at")
         if not enriched_at:
             continue
         try:
-            ts = datetime.strptime(enriched_at, "%Y-%m-%d %H:%M:%S")
+            ts = datetime.strptime(enriched_at, "%Y-%m-%d %H:%M:%S").replace(tzinfo=timezone.utc)
         except ValueError:
             continue
         if ts >= cutoff:
@@ -509,8 +509,14 @@ with buscar_tab:
         st.success(f"Run iniciado: {run_id}")
 
     if st.session_state.current_run_id:
-        run = storage.get_run(st.session_state.current_run_id)
-        if run:
+        current_run_id = st.session_state.current_run_id
+
+        @st.fragment(run_every="2s")
+        def _render_run_status(run_id: str) -> None:
+            run = storage.get_run(run_id)
+            if not run:
+                st.info("Run nao encontrado.")
+                return
             st.markdown("---")
             st.subheader("Status do run")
             col_a, col_b, col_c, col_d = st.columns(4)
@@ -712,6 +718,8 @@ with buscar_tab:
             else:
                 st.info("Sem logs para este run ainda.")
 
+        _render_run_status(current_run_id)
+
 with monitor_tab:
     st.subheader("Monitor (Live)")
 
@@ -841,6 +849,9 @@ with monitor_tab:
 
 with resultados_tab:
     st.subheader("Resultados")
+
+    municipio = ""
+    uf_filter = ""
 
     col1, col2, col3, col4 = st.columns(4)
     with col1:
@@ -1304,7 +1315,7 @@ with recovery_tab:
         upload_dir = Path("uploads")
         upload_dir.mkdir(parents=True, exist_ok=True)
         suffix = Path(uploaded_file.name).suffix or ".xlsx"
-        file_name = f"excel_{datetime.utcnow().strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}{suffix}"
+        file_name = f"excel_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M%S')}_{uuid4().hex}{suffix}"
         file_path = upload_dir / file_name
         with open(file_path, "wb") as handle:
             handle.write(uploaded_file.getbuffer())
@@ -1362,90 +1373,98 @@ with recovery_tab:
         format_func=_run_label,
     )
 
-    if selected_run_id:
-        run = storage.get_run(selected_run_id)
-        if run:
-            params = _parse_json(run.get("params_json"))
-            run_type = str(params.get("run_type") or "standard")
-            enable_enrichment = bool(params.get("enable_enrichment", True))
-            run_steps = storage.fetch_run_steps(selected_run_id)
-            stepper_lines, progress_pct = _format_stepper(
-                run_steps,
-                run.get("status"),
-                enable_enrichment,
-                run_type,
+    @st.fragment(run_every="2s")
+    def _render_recovery_live(run_id: str) -> None:
+        if not run_id:
+            st.info("Selecione um run para acompanhar.")
+            return
+        run = storage.get_run(run_id)
+        if not run:
+            st.warning("Run nao encontrado.")
+            return
+        params = _parse_json(run.get("params_json"))
+        run_type = str(params.get("run_type") or "standard")
+        enable_enrichment = bool(params.get("enable_enrichment", True))
+        run_steps = storage.fetch_run_steps(run_id)
+        stepper_lines, progress_pct = _format_stepper(
+            run_steps,
+            run.get("status"),
+            enable_enrichment,
+            run_type,
+        )
+        st.markdown("#### Status")
+        col_s1, col_s2, col_s3, col_s4 = st.columns(4)
+        col_s1.metric("Status", run.get("status"))
+        col_s2.metric("Total leads", run.get("total_leads"))
+        col_s3.metric("Enriquecidos", run.get("enriched_count"))
+        col_s4.metric("Erros", run.get("errors_count"))
+        if run.get("status") == "completed":
+            st.success("Run concluido.")
+        elif run.get("status") == "completed_with_warnings":
+            st.warning("Run concluido com avisos.")
+        elif run.get("status") == "paused_provider_limit":
+            max_rps = int(_env("SERPER_MAX_RPS", "5"))
+            st.warning(
+                f"Serper limitou a {max_rps} req/s. O Hunter OS pausou para evitar custo e bloqueio."
             )
-            st.markdown("#### Status")
-            col_s1, col_s2, col_s3, col_s4 = st.columns(4)
-            col_s1.metric("Status", run.get("status"))
-            col_s2.metric("Total leads", run.get("total_leads"))
-            col_s3.metric("Enriquecidos", run.get("enriched_count"))
-            col_s4.metric("Erros", run.get("errors_count"))
-            if run.get("status") == "completed":
-                st.success("Run concluido.")
-            elif run.get("status") == "completed_with_warnings":
-                st.warning("Run concluido com avisos.")
-            elif run.get("status") == "paused_provider_limit":
-                max_rps = int(_env("SERPER_MAX_RPS", "5"))
-                st.warning(
-                    f"Serper limitou a {max_rps} req/s. O Hunter OS pausou para evitar custo e bloqueio."
+        elif run.get("status") == "failed":
+            st.error("Run falhou. Veja erros abaixo.")
+        warning_reason = _warning_reason_text(run.get("warning_reason"))
+        if warning_reason:
+            st.caption(f"Aviso: {warning_reason}")
+        provider_status = run.get("provider_http_status")
+        provider_message = run.get("provider_message")
+        if provider_status or provider_message:
+            st.caption(f"Provider feedback: HTTP {provider_status or '-'} - {provider_message or '-'}")
+
+        st.progress(progress_pct)
+        st.caption(f"Progresso geral: {progress_pct}%")
+        st.markdown(stepper_lines)
+
+        enrich_step = _find_step(run_steps, "enriching")
+        enrich_details = _parse_json(enrich_step.get("details_json")) if enrich_step else {}
+        processed_count = enrich_details.get("processed_count")
+        errors_count = enrich_details.get("errors_count")
+        cache_hits = enrich_details.get("cache_hits")
+        avg_fetch_ms = enrich_details.get("avg_fetch_ms")
+        alvo = enrich_details.get("alvo_enriquecimento")
+        if any(value is not None for value in [processed_count, errors_count, cache_hits, avg_fetch_ms, alvo]):
+            st.markdown("#### Enriquecimento (detalhes)")
+            col_e1, col_e2, col_e3, col_e4, col_e5 = st.columns(5)
+            col_e1.metric("Alvo", alvo or 0)
+            col_e2.metric("Processados", processed_count or 0)
+            col_e3.metric("Erros", errors_count or 0)
+            col_e4.metric("Cache hits", cache_hits or 0)
+            col_e5.metric("Tempo medio (ms)", avg_fetch_ms or 0)
+
+        logs = storage.fetch_logs(limit=30, run_id=run_id)
+        if logs:
+            rows = []
+            for log in logs:
+                message = _log_message(log.get("detail_json", "")) or log.get("detail_json", "")
+                rows.append(
+                    {
+                        "created_at": log.get("created_at"),
+                        "level": log.get("level"),
+                        "event": log.get("event"),
+                        "message": message,
+                    }
                 )
-            elif run.get("status") == "failed":
-                st.error("Run falhou. Veja erros abaixo.")
-            warning_reason = _warning_reason_text(run.get("warning_reason"))
-            if warning_reason:
-                st.caption(f"Aviso: {warning_reason}")
-            provider_status = run.get("provider_http_status")
-            provider_message = run.get("provider_message")
-            if provider_status or provider_message:
-                st.caption(f"Provider feedback: HTTP {provider_status or '-'} - {provider_message or '-'}")
+            st.markdown("#### Logs recentes")
+            st.dataframe(pd.DataFrame(rows), width="stretch")
+        else:
+            st.info("Sem logs ainda para este run.")
 
-            st.progress(progress_pct)
-            st.caption(f"Progresso geral: {progress_pct}%")
-            st.markdown(stepper_lines)
+        errors = storage.fetch_errors(run_id, limit=20)
+        if errors:
+            st.markdown("#### Erros recentes")
+            df_errors = pd.DataFrame(errors)
+            st.dataframe(
+                df_errors[["created_at", "step_name", "error"]],
+                width="stretch",
+            )
 
-            enrich_step = _find_step(run_steps, "enriching")
-            enrich_details = _parse_json(enrich_step.get("details_json")) if enrich_step else {}
-            processed_count = enrich_details.get("processed_count")
-            errors_count = enrich_details.get("errors_count")
-            cache_hits = enrich_details.get("cache_hits")
-            avg_fetch_ms = enrich_details.get("avg_fetch_ms")
-            alvo = enrich_details.get("alvo_enriquecimento")
-            if any(value is not None for value in [processed_count, errors_count, cache_hits, avg_fetch_ms, alvo]):
-                st.markdown("#### Enriquecimento (detalhes)")
-                col_e1, col_e2, col_e3, col_e4, col_e5 = st.columns(5)
-                col_e1.metric("Alvo", alvo or 0)
-                col_e2.metric("Processados", processed_count or 0)
-                col_e3.metric("Erros", errors_count or 0)
-                col_e4.metric("Cache hits", cache_hits or 0)
-                col_e5.metric("Tempo medio (ms)", avg_fetch_ms or 0)
-
-            logs = storage.fetch_logs(limit=30, run_id=selected_run_id)
-            if logs:
-                rows = []
-                for log in logs:
-                    message = _log_message(log.get("detail_json", "")) or log.get("detail_json", "")
-                    rows.append(
-                        {
-                            "created_at": log.get("created_at"),
-                            "level": log.get("level"),
-                            "event": log.get("event"),
-                            "message": message,
-                        }
-                    )
-                st.markdown("#### Logs recentes")
-                st.dataframe(pd.DataFrame(rows), width="stretch")
-            else:
-                st.info("Sem logs ainda para este run.")
-
-            errors = storage.fetch_errors(selected_run_id, limit=20)
-            if errors:
-                st.markdown("#### Erros recentes")
-                df_errors = pd.DataFrame(errors)
-                st.dataframe(
-                    df_errors[["created_at", "step_name", "error"]],
-                    width="stretch",
-                )
+    _render_recovery_live(selected_run_id)
 
 with vault_tab:
     st.subheader("Enrichment Vault")
