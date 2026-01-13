@@ -1,0 +1,8 @@
+streamlit>=1.28.0
+pandas>=2.0.0
+requests>=2.31.0
+beautifulsoup4>=4.12.0
+googlesearch-python>=1.2.3
+backoff>=2.2.1
+phonenumbers>=8.13.0
+tqdm>=4.66.0
