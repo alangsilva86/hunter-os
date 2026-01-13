@@ -616,12 +616,13 @@ def export_create_v5(
 ) -> Dict[str, Any]:
     client = CasaDosDadosClient()
     export_payload = {
-        "total_linhas": total_linhas,
         "nome": nome or f"hunter_os_{int(time.time())}",
         "tipo": "csv",
         "enviar_para": enviar_para or [],
         "pesquisa": payload,
     }
+    if total_linhas and total_linhas > 0:
+        export_payload["total_linhas"] = total_linhas
     fingerprint = _fingerprint(payload)
     resp = client._post(
         CASA_DOS_DADOS_EXPORT_CREATE_URL,
@@ -647,7 +648,7 @@ def export_create_v5(
         arquivo_uuid=arquivo_uuid,
         payload_fingerprint=fingerprint,
         status="created",
-        total_linhas=total_linhas,
+        total_linhas=total_linhas if total_linhas > 0 else None,
     )
     return {
         "arquivo_uuid": arquivo_uuid,
@@ -672,20 +673,29 @@ def export_list_v4(page: int = 1, run_id: Optional[str] = None) -> List[Dict[str
     for item in items:
         arquivo_uuid = item.get("arquivo_uuid") or item.get("arquivoUUID") or ""
         status = str(item.get("status") or "").lower()
+        quantidade = item.get("quantidade")
+        quantidade_solicitada = item.get("quantidade_solicitada")
+        total_linhas = None
+        if quantidade is not None:
+            total_linhas = quantidade
+        elif quantidade_solicitada is not None:
+            total_linhas = quantidade_solicitada
         storage.record_export_snapshot(
             run_id=run_id,
             arquivo_uuid=arquivo_uuid,
             status=status,
-            quantidade=item.get("quantidade"),
-            quantidade_solicitada=item.get("quantidade_solicitada"),
+            quantidade=quantidade,
+            quantidade_solicitada=quantidade_solicitada,
             raw=item,
         )
         if arquivo_uuid:
-            storage.update_casa_export(
-                arquivo_uuid,
-                status=status,
-                updated_at=storage._utcnow(),
-            )
+            updates = {
+                "status": status,
+                "updated_at": storage._utcnow(),
+            }
+            if total_linhas is not None:
+                updates["total_linhas"] = total_linhas
+            storage.update_casa_export(arquivo_uuid, **updates)
     return items
 
 
@@ -716,21 +726,37 @@ def export_poll_v4_public(
             time.sleep(backoff_seconds * (attempt + 1))
             continue
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                response_excerpt = _response_excerpt(resp)
+                storage.record_export_snapshot(
+                    run_id=run_id,
+                    arquivo_uuid=arquivo_uuid,
+                    status="resposta_vazia",
+                    quantidade=None,
+                    quantidade_solicitada=None,
+                    raw={"status_code": resp.status_code, "body_excerpt": response_excerpt},
+                )
+                raise RuntimeError(
+                    "Resposta vazia da Casa dos Dados ao consultar o export. Tente novamente em instantes."
+                )
             link = data.get("link") or data.get("url") or ""
+            total_linhas = data.get("quantidade") or data.get("total") or None
             expires_at = time.time() + CASA_EXPORT_LINK_TTL_SECONDS
             storage.update_casa_export(
                 arquivo_uuid,
                 status="processado",
                 link=link,
                 expires_at=time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(expires_at)),
+                total_linhas=total_linhas,
                 updated_at=storage._utcnow(),
             )
             storage.record_export_snapshot(
                 run_id=run_id,
                 arquivo_uuid=arquivo_uuid,
                 status="processado",
-                quantidade=None,
+                quantidade=total_linhas,
                 quantidade_solicitada=None,
                 raw=data,
             )
