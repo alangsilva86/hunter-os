@@ -69,30 +69,51 @@ class SearchProvider(ABC):
                 )
             raise ProviderResponseError(f"{self.name} resposta nao-JSON: {excerpt}", status_code=resp.status)
 
-    def _extract_links(self, data: Dict[str, Any]) -> List[str]:
-        links: List[str] = []
+    def _extract_candidates(self, data: Dict[str, Any]) -> List[Dict[str, Any]]:
+        candidates: List[Dict[str, Any]] = []
+
+        def _add(url: Optional[str], title: str = "", snippet: str = "", source: str = "organic") -> None:
+            if not url:
+                return
+            candidates.append(
+                {
+                    "url": url,
+                    "title": title or "",
+                    "snippet": snippet or "",
+                    "source": source,
+                }
+            )
+
         if isinstance(data, dict):
-            if "organic" in data:
-                for item in data.get("organic", []) or []:
-                    link = item.get("link") or item.get("url")
-                    if link:
-                        links.append(link)
-            if "organic_results" in data:
-                for item in data.get("organic_results", []) or []:
-                    link = item.get("link") or item.get("url")
-                    if link:
-                        links.append(link)
-            if "results" in data:
-                for item in data.get("results", []) or []:
-                    link = item.get("link") or item.get("url")
-                    if link:
-                        links.append(link)
-            if "webPages" in data:
-                for item in data.get("webPages", {}).get("value", []) or []:
-                    link = item.get("url")
-                    if link:
-                        links.append(link)
-        return links
+            for item in data.get("organic", []) or []:
+                _add(item.get("link") or item.get("url"), item.get("title") or "", item.get("snippet") or "", "organic")
+            for item in data.get("organic_results", []) or []:
+                _add(item.get("link") or item.get("url"), item.get("title") or "", item.get("snippet") or "", "organic")
+            for item in data.get("results", []) or []:
+                _add(item.get("link") or item.get("url"), item.get("title") or "", item.get("snippet") or "", "organic")
+            for item in data.get("webPages", {}).get("value", []) or []:
+                _add(item.get("url"), item.get("name") or "", item.get("snippet") or "", "organic")
+
+            knowledge = data.get("knowledgeGraph") or data.get("knowledge_graph") or {}
+            if isinstance(knowledge, dict):
+                _add(
+                    knowledge.get("website") or knowledge.get("url"),
+                    knowledge.get("title") or knowledge.get("name") or "",
+                    knowledge.get("description") or "",
+                    "knowledge",
+                )
+
+            for item in data.get("places", []) or data.get("local_results", []) or []:
+                if not isinstance(item, dict):
+                    continue
+                _add(
+                    item.get("website") or item.get("link") or item.get("url"),
+                    item.get("title") or item.get("name") or "",
+                    item.get("address") or item.get("snippet") or "",
+                    "map",
+                )
+
+        return candidates
 
     def _classify(self, links: List[str]) -> Dict[str, Any]:
         site = None
@@ -141,8 +162,11 @@ class SerperProvider(SearchProvider):
         payload = {"q": query, "gl": self.gl, "hl": self.hl}
         async with session.post(self.base_url, headers=headers, json=payload) as resp:
             data = await self._safe_json(resp)
-        links = self._extract_links(data)
-        return self._classify(links)
+        candidates = self._extract_candidates(data)
+        links = [item.get("url") for item in candidates if item.get("url")]
+        classified = self._classify(links)
+        classified["candidates"] = candidates
+        return classified
 
 
 def select_provider(name: str) -> SearchProvider:

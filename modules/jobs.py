@@ -288,8 +288,11 @@ def _process_leads(
     enrichment_map = {item.get("cnpj"): item for item in enriched_results}
     for lead in cleaned:
         enrichment = enrichment_map.get(lead.get("cnpj"), {})
-        lead["score_v2"] = scoring.score_v2(lead, enrichment)
-        lead["score_label"] = scoring.label(lead["score_v2"])
+        score, reasons, version = scoring.score_with_reasons(lead, enrichment)
+        lead["score_v2"] = score
+        lead["score_label"] = scoring.label(score)
+        if lead.get("cnpj") in enrichment_map:
+            storage.update_enrichment_scoring(lead.get("cnpj"), version, reasons)
 
     storage.upsert_leads_clean(cleaned)
     storage.record_run_step(

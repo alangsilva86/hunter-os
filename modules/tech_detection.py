@@ -26,6 +26,27 @@ TECH_SIGNATURES: Dict[str, Dict[str, Any]] = {
         "cookies": [r"hubspotutk"],
         "headers": [],
     },
+    "salesforce": {
+        "category": "enterprise",
+        "script_src": [r"salesforce", r"force\.com"],
+        "html": [r"salesforce", r"force\.com"],
+        "cookies": [r"sid", r"sid_client", r"BrowserId"],
+        "headers": [r"x-powered-by:\s*salesforce"],
+    },
+    "oracle": {
+        "category": "enterprise",
+        "script_src": [r"oracle", r"eloqua"],
+        "html": [r"oracle", r"eloqua"],
+        "cookies": [r"ora_", r"eloqua"],
+        "headers": [r"x-powered-by:\s*oracle"],
+    },
+    "sap": {
+        "category": "enterprise",
+        "script_src": [r"sap", r"hybris"],
+        "html": [r"sap", r"hybris"],
+        "cookies": [r"sap", r"hybris"],
+        "headers": [r"x-powered-by:\s*sap"],
+    },
     "activecampaign": {
         "category": "marketing",
         "script_src": [r"trackcmp\.net", r"activecampaign\.com"],
@@ -82,6 +103,13 @@ TECH_SIGNATURES: Dict[str, Dict[str, Any]] = {
         "cookies": [r"VtexIdclientAutCookie"],
         "headers": [],
     },
+    "magento": {
+        "category": "ecommerce",
+        "script_src": [r"magento", r"mage/"],
+        "html": [r"magento", r"mage/cookies"],
+        "cookies": [r"mage-", r"frontend="],
+        "headers": [],
+    },
     "wix": {
         "category": "ecommerce",
         "script_src": [r"wix\.com", r"wixsite\.com"],
@@ -124,6 +152,7 @@ CATEGORY_POINTS = {
     "analytics": 7,
     "ecommerce": 7,
     "chat": 3,
+    "enterprise": 8,
 }
 
 CONFIDENCE_WEIGHTS = {
@@ -131,6 +160,18 @@ CONFIDENCE_WEIGHTS = {
     "header": 25,
     "script_src": 20,
     "html": 10,
+}
+
+GOLDEN_TECHS = {
+    "salesforce",
+    "hubspot",
+    "vtex",
+    "oracle",
+    "sap",
+    "shopify",
+    "magento",
+    "zendesk",
+    "rd_station",
 }
 
 TRANSIENT_STATUS = {429, 500, 502, 503, 504}
@@ -257,6 +298,7 @@ class TechSniperDetector:
     ) -> Dict[str, Any]:
         detected_stack: List[str] = []
         signals: Dict[str, List[str]] = {}
+        tech_sources: Dict[str, List[str]] = {}
         confidence = 0
         html_lower = (html or "").lower()
         header_blob = "\n".join([f"{k}: {v}" for k, v in headers.items()]).lower()
@@ -297,6 +339,8 @@ class TechSniperDetector:
             if evidence:
                 detected_stack.append(tech)
                 signals[tech] = evidence
+                sources = sorted({item.split(":", 1)[0] for item in evidence if ":" in item})
+                tech_sources[tech] = sources
                 category = sig.get("category")
                 if category in categories_found:
                     categories_found[category] = True
@@ -324,6 +368,8 @@ class TechSniperDetector:
         has_ecommerce = categories_found.get("ecommerce", False)
         has_chat = categories_found.get("chat", False)
         has_whatsapp_link = "wa.me/" in html_lower or "api.whatsapp.com" in html_lower
+        golden_techs_found = [tech for tech in detected_stack if tech in GOLDEN_TECHS]
+        tech_sources_flat = sorted({src for sources in tech_sources.values() for src in sources})
 
         return {
             "detected_stack": detected_stack,
@@ -335,6 +381,9 @@ class TechSniperDetector:
             "has_ecommerce": has_ecommerce,
             "has_chat": has_chat,
             "has_whatsapp_link": has_whatsapp_link,
+            "golden_techs_found": golden_techs_found,
+            "tech_sources": tech_sources,
+            "tech_sources_flat": tech_sources_flat,
         }
 
     async def detect(
@@ -376,8 +425,9 @@ class TechSniperDetector:
             if not fetch_result.get("html"):
                 continue
 
+            html_content = fetch_result.get("html") or ""
             analysis = self.analyze_content(
-                fetch_result.get("html") or "",
+                html_content,
                 fetch_result.get("headers") or {},
                 fetch_result.get("cookies") or [],
             )
@@ -387,13 +437,14 @@ class TechSniperDetector:
                 "fetch_ms": fetch_result.get("fetch_ms"),
                 "fetched_url": fetch_result.get("fetched_url"),
                 "error": fetch_result.get("error"),
+                "html_size": len(html_content),
                 "rendered_used": False,
                 "cache_hit": False,
             }
             cache_payload = dict(result)
             storage.cache_set(cache_key, cache_payload, ttl_hours=self.cache_ttl_hours)
             if return_html:
-                result["_html"] = fetch_result.get("html") or ""
+                result["_html"] = html_content
             return result
 
         return {
@@ -410,6 +461,7 @@ class TechSniperDetector:
             "fetch_ms": 0,
             "fetched_url": None,
             "error": "fetch_failed",
+            "html_size": 0,
             "rendered_used": False,
             "cache_hit": False,
         }
@@ -430,9 +482,12 @@ class OptionalRenderedDetector:
             base_result["rendered_used"] = False
             return base_result
 
+        fetch_status = base_result.get("fetch_status")
+        html_size = int(base_result.get("html_size") or 0)
         confidence = int(base_result.get("confidence") or 0)
         tech_score = int(base_result.get("tech_score") or 0)
-        if tech_score > 0 and confidence >= 30:
+        needs_render = fetch_status in {403, 429, 520} or html_size < 400
+        if tech_score > 0 and confidence >= 30 and not needs_render:
             base_result["rendered_used"] = False
             return base_result
 

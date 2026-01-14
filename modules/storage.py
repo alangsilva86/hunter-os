@@ -228,6 +228,16 @@ def init_db() -> None:
         _ensure_column(conn, "enrichments", "fetch_status", "INTEGER")
         _ensure_column(conn, "enrichments", "fetch_ms", "INTEGER")
         _ensure_column(conn, "enrichments", "rendered_used", "INTEGER")
+        _ensure_column(conn, "enrichments", "website_confidence", "INTEGER")
+        _ensure_column(conn, "enrichments", "discovery_method", "TEXT")
+        _ensure_column(conn, "enrichments", "search_term_used", "TEXT")
+        _ensure_column(conn, "enrichments", "candidates_considered", "INTEGER")
+        _ensure_column(conn, "enrichments", "website_match_reasons", "TEXT")
+        _ensure_column(conn, "enrichments", "excluded_candidates_count", "INTEGER")
+        _ensure_column(conn, "enrichments", "golden_techs_found", "TEXT")
+        _ensure_column(conn, "enrichments", "tech_sources", "TEXT")
+        _ensure_column(conn, "enrichments", "score_version", "TEXT")
+        _ensure_column(conn, "enrichments", "score_reasons", "TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_enrichments_run ON enrichments(run_id)")
 
         cur.execute(
@@ -719,8 +729,11 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
                 has_form, tech_stack_json, tech_score, tech_confidence,
                 has_marketing, has_analytics, has_ecommerce, has_chat,
                 signals_json, fetched_url, fetch_status, fetch_ms,
-                rendered_used, contact_quality, notes, enriched_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                rendered_used, contact_quality, notes, enriched_at,
+                website_confidence, discovery_method, search_term_used,
+                candidates_considered, website_match_reasons, excluded_candidates_count,
+                golden_techs_found, tech_sources, score_version, score_reasons
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cnpj) DO UPDATE SET
                 run_id=excluded.run_id,
                 site=excluded.site,
@@ -744,7 +757,17 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
                 rendered_used=excluded.rendered_used,
                 contact_quality=excluded.contact_quality,
                 notes=excluded.notes,
-                enriched_at=excluded.enriched_at
+                enriched_at=excluded.enriched_at,
+                website_confidence=excluded.website_confidence,
+                discovery_method=excluded.discovery_method,
+                search_term_used=excluded.search_term_used,
+                candidates_considered=excluded.candidates_considered,
+                website_match_reasons=excluded.website_match_reasons,
+                excluded_candidates_count=excluded.excluded_candidates_count,
+                golden_techs_found=excluded.golden_techs_found,
+                tech_sources=excluded.tech_sources,
+                score_version=excluded.score_version,
+                score_reasons=excluded.score_reasons
             """,
             (
                 cnpj,
@@ -771,6 +794,16 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
                 data.get("contact_quality"),
                 data.get("notes"),
                 data.get("enriched_at") or _utcnow(),
+                data.get("website_confidence"),
+                data.get("discovery_method"),
+                data.get("search_term_used"),
+                data.get("candidates_considered"),
+                json.dumps(data.get("website_match_reasons", []), ensure_ascii=False),
+                data.get("excluded_candidates_count"),
+                json.dumps(data.get("golden_techs_found", []), ensure_ascii=False),
+                json.dumps(data.get("tech_sources", {}), ensure_ascii=False),
+                data.get("score_version"),
+                json.dumps(data.get("score_reasons", []), ensure_ascii=False),
             ),
         )
 
@@ -1111,7 +1144,10 @@ def _vault_select_sql() -> str:
         "e.google_maps_url, e.has_contact_page, e.has_form, e.tech_stack_json, "
         "e.tech_score, e.tech_confidence, e.has_marketing, e.has_analytics, "
         "e.has_ecommerce, e.has_chat, e.signals_json, e.fetched_url, e.fetch_status, "
-        "e.fetch_ms, e.rendered_used, e.notes, e.enriched_at "
+        "e.fetch_ms, e.rendered_used, e.notes, e.enriched_at, "
+        "e.website_confidence, e.discovery_method, e.search_term_used, "
+        "e.candidates_considered, e.website_match_reasons, e.excluded_candidates_count, "
+        "e.golden_techs_found, e.tech_sources, e.score_version, e.score_reasons "
         "FROM leads_clean lc LEFT JOIN enrichments e ON lc.cnpj = e.cnpj "
     )
 
@@ -1243,6 +1279,22 @@ def update_lead_scores(cnpj: str, score_v2: int, score_label: str) -> None:
             WHERE cnpj = ?
             """,
             (score_v2, score_label, _utcnow(), cnpj),
+        )
+
+
+def update_enrichment_scoring(
+    cnpj: str,
+    score_version: str,
+    score_reasons: List[str],
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE enrichments
+            SET score_version = ?, score_reasons = ?
+            WHERE cnpj = ?
+            """,
+            (score_version, json.dumps(score_reasons, ensure_ascii=False), cnpj),
         )
 
 

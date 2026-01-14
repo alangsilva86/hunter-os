@@ -3,6 +3,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import os
 import random
 import re
@@ -11,7 +12,7 @@ import time
 from datetime import datetime, timedelta
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -22,6 +23,66 @@ from modules.providers import ProviderResponseError, SearchProvider
 from modules.tech_detection import OptionalRenderedDetector, TechSniperDetector
 
 CONTACT_PATHS = ["/contato", "/fale-conosco", "/contact", "/contato/", "/fale-conosco/"]
+
+logger = logging.getLogger("hunter")
+
+DISCOVERY_TOP_N = 8
+DISCOVERY_MIN_SCORE = 60
+DISCOVERY_TIMEOUT_SEC = 3
+
+EXCLUDED_DOMAIN_KEYWORDS = {
+    "econodata",
+    "cnpj",
+    "receita",
+    "serasa",
+    "telelistas",
+    "guiamais",
+    "maplink",
+    "jusbrasil",
+    "consultacnpj",
+    "empresometro",
+    "solutudo",
+    "listas",
+    "acim",
+    "achei",
+    "guia",
+    "indicador",
+    "zalles",
+    "cadastro",
+    "linkedin.com",
+    "instagram.com",
+    "facebook.com",
+    "tiktok.com",
+    "youtube.com",
+    "twitter.com",
+}
+
+PARKED_HINTS = [
+    "domain for sale",
+    "comprar este dominio",
+    "este dominio esta a venda",
+    "parking",
+    "sedo",
+    "godaddy",
+    "hugedomains",
+    "afternic",
+    "dan.com",
+    "unavailable",
+    "under construction",
+    "coming soon",
+]
+
+LEGAL_SUFFIXES = [
+    "ltda",
+    "me",
+    "epp",
+    "eireli",
+    "s/a",
+    "sa",
+    "mei",
+    "sociedade empresaria limitada",
+    "sociedade limitada",
+]
 
 
 class RateLimiter:
@@ -77,6 +138,157 @@ def _provider_hint(provider_name: str, message: str) -> Optional[str]:
     return None
 
 
+def _normalize_text(text: str) -> str:
+    cleaned = re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower())
+    return re.sub(r"\s+", " ", cleaned).strip()
+
+
+def _simplify_legal_name(name: str) -> str:
+    text = _normalize_text(name)
+    for suffix in LEGAL_SUFFIXES:
+        text = re.sub(rf"\b{re.escape(suffix)}\b", " ", text)
+    return re.sub(r"\s+", " ", text).strip()
+
+
+def _extract_domain(url: str) -> str:
+    if not url:
+        return ""
+    parsed = urlparse(url if "://" in url else f"https://{url}")
+    domain = parsed.netloc or parsed.path
+    return domain.lower().strip("/")
+
+
+def _is_excluded_domain(domain: str) -> bool:
+    if not domain:
+        return True
+    return any(keyword in domain for keyword in EXCLUDED_DOMAIN_KEYWORDS)
+
+
+def _is_parked_domain(html: str, headers: Dict[str, str]) -> bool:
+    blob = (html or "").lower()
+    header_blob = " ".join([f"{k}: {v}" for k, v in headers.items()]).lower()
+    if any(hint in blob for hint in PARKED_HINTS):
+        return True
+    if any(hint in header_blob for hint in ("parked", "parking", "sedoparking", "godaddy")):
+        return True
+    return False
+
+
+def _build_search_queries(lead: Dict[str, Any]) -> List[str]:
+    municipio = lead.get("municipio") or ""
+    uf = lead.get("uf") or ""
+    fantasia = (lead.get("nome_fantasia") or "").strip()
+    razao = (lead.get("razao_social") or "").strip()
+    simplified = _simplify_legal_name(razao)
+
+    if fantasia:
+        return [
+            f"\"{fantasia}\" {municipio} {uf} site oficial".strip(),
+            f"\"{fantasia}\" {municipio} {uf} contato whatsapp".strip(),
+        ]
+    if simplified:
+        return [
+            f"\"{simplified}\" {municipio} {uf} site".strip(),
+            f"\"{simplified}\" {municipio} {uf} contato".strip(),
+        ]
+    return []
+
+
+def _candidate_from_url(
+    url: str,
+    source: str,
+    title: str = "",
+    snippet: str = "",
+    search_term: str = "",
+) -> Dict[str, Any]:
+    return {
+        "url": url,
+        "domain": _extract_domain(url),
+        "title": title or "",
+        "snippet": snippet or "",
+        "source": source,
+        "search_term": search_term or "",
+    }
+
+
+def _html_contains_contact(html_lower: str) -> bool:
+    return any(term in html_lower for term in ("contato", "fale conosco", "whatsapp", "telefone"))
+
+
+def _html_contains_schema(html_lower: str) -> bool:
+    return "schema.org/organization" in html_lower or "schema.org/localbusiness" in html_lower
+
+
+def score_website_candidate(
+    candidate: Dict[str, Any],
+    lead: Dict[str, Any],
+    html: str,
+    headers: Dict[str, str],
+    fetched_url: str,
+) -> Tuple[int, List[str]]:
+    reasons: List[str] = []
+    score = 0
+
+    domain = candidate.get("domain") or _extract_domain(candidate.get("url") or "")
+    if _is_excluded_domain(domain):
+        return 0, ["excluded_domain"]
+    if _is_parked_domain(html, headers):
+        return 0, ["parked_domain"]
+
+    score += 5
+    reasons.append("not_aggregator")
+
+    html_lower = (html or "").lower()
+    title = candidate.get("title") or ""
+    soup = BeautifulSoup(html, "html.parser")
+    html_title = (soup.title.string or "").strip() if soup.title else ""
+    title = html_title or title
+    og_site = ""
+    meta_site = soup.find("meta", attrs={"property": "og:site_name"})
+    if meta_site and meta_site.get("content"):
+        og_site = meta_site.get("content", "").strip()
+
+    brand = (lead.get("nome_fantasia") or "") or _simplify_legal_name(lead.get("razao_social") or "")
+    brand_norm = _normalize_text(brand)
+    title_norm = _normalize_text(title or og_site)
+    if brand_norm and title_norm:
+        similarity = SequenceMatcher(None, brand_norm, title_norm).ratio()
+        if similarity >= 0.6:
+            score += 35
+            reasons.append("brand_match")
+        elif similarity >= 0.4:
+            score += 15
+            reasons.append("brand_partial")
+        else:
+            score -= 10
+            reasons.append("brand_mismatch")
+
+    municipio = _normalize_text(lead.get("municipio") or "")
+    uf = _normalize_text(lead.get("uf") or "")
+    if municipio and municipio in html_lower:
+        score += 10
+        reasons.append("city_match")
+    if uf and uf in html_lower:
+        score += 5
+        reasons.append("uf_match")
+
+    if _html_contains_contact(html_lower):
+        score += 10
+        reasons.append("contact_found")
+    if _html_contains_schema(html_lower):
+        score += 10
+        reasons.append("schema_org")
+
+    if fetched_url:
+        fetched_domain = _extract_domain(fetched_url)
+        if fetched_domain and fetched_domain.endswith(domain.replace("www.", "")):
+            score += 5
+            reasons.append("redirect_ok")
+
+    score = max(0, min(score, 100))
+    return score, reasons
+
+
 class AsyncEnricher:
     def __init__(
         self,
@@ -125,11 +337,159 @@ class AsyncEnricher:
         storage.cache_set(cache_key, data, ttl_hours=self.cache_ttl_hours)
         return data
 
+    async def _discover_website(self, session: aiohttp.ClientSession, lead: Dict[str, Any]) -> Dict[str, Any]:
+        discovery_start = time.time()
+        probe_ms = 0
+        search_ms = 0
+        rank_ms = 0
+        excluded_count = 0
+        candidates: List[Dict[str, Any]] = []
+
+        instagram = None
+        linkedin_company = None
+        linkedin_people: List[str] = []
+
+        emails = lead.get("emails_norm") or []
+        if isinstance(emails, str):
+            try:
+                emails = json.loads(emails)
+            except Exception:
+                emails = [emails]
+        email = emails[0] if emails else lead.get("email")
+        domain = _email_domain(email)
+        if domain and not _is_generic_email(email) and await _dns_valid(domain):
+            probe_start = time.time()
+            for url in [f"https://{domain}", f"http://{domain}", f"https://www.{domain}"]:
+                fetch = await _fetch_candidate_html(session, url, timeout_sec=DISCOVERY_TIMEOUT_SEC)
+                if fetch.get("status") != 200:
+                    continue
+                if _is_parked_domain(fetch.get("html", ""), fetch.get("headers", {})):
+                    excluded_count += 1
+                    continue
+                candidate = _candidate_from_url(
+                    fetch.get("fetched_url") or url,
+                    "email_domain",
+                    search_term="EMAIL_DOMAIN",
+                )
+                candidate["fetch"] = fetch
+                candidates.append(candidate)
+                break
+            probe_ms = int((time.time() - probe_start) * 1000)
+
+        queries = _build_search_queries(lead)
+        for query in queries:
+            search_start = time.time()
+            search_data = await self._search(session, query)
+            search_ms += int((time.time() - search_start) * 1000)
+
+            if not instagram and search_data.get("instagram"):
+                instagram = search_data.get("instagram")
+            if not linkedin_company and search_data.get("linkedin_company"):
+                linkedin_company = search_data.get("linkedin_company")
+            linkedin_people.extend(search_data.get("linkedin_people", []))
+
+            for item in search_data.get("candidates", []) or []:
+                url = item.get("url")
+                if not url:
+                    continue
+                candidates.append(
+                    _candidate_from_url(
+                        url,
+                        "search",
+                        title=item.get("title") or "",
+                        snippet=item.get("snippet") or "",
+                        search_term=query,
+                    )
+                )
+
+        social_candidates: List[Dict[str, Any]] = []
+        for social_url in [linkedin_company, instagram]:
+            if not social_url:
+                continue
+            fetch = await _fetch_candidate_html(session, social_url, timeout_sec=DISCOVERY_TIMEOUT_SEC)
+            anchor = _extract_external_link(fetch.get("html", ""))
+            if anchor:
+                social_candidates.append(_candidate_from_url(anchor, "social_anchor", search_term="SOCIAL_ANCHOR"))
+
+        candidates.extend(social_candidates)
+
+        deduped: List[Dict[str, Any]] = []
+        seen_domains: set = set()
+        for candidate in candidates:
+            domain = candidate.get("domain") or _extract_domain(candidate.get("url") or "")
+            if not domain or domain in seen_domains:
+                continue
+            seen_domains.add(domain)
+            candidate["domain"] = domain
+            deduped.append(candidate)
+            if len(deduped) >= DISCOVERY_TOP_N:
+                break
+
+        best_candidate: Optional[Dict[str, Any]] = None
+        best_score = 0
+        best_reasons: List[str] = []
+        best_query = ""
+
+        rank_start = time.time()
+        for candidate in deduped:
+            domain = candidate.get("domain") or ""
+            if _is_excluded_domain(domain):
+                excluded_count += 1
+                continue
+            fetch = candidate.get("fetch")
+            if not fetch:
+                fetch = await _fetch_candidate_html(session, candidate.get("url") or "", timeout_sec=DISCOVERY_TIMEOUT_SEC)
+            html = fetch.get("html", "")
+            headers = fetch.get("headers", {})
+            fetched_url = fetch.get("fetched_url") or candidate.get("url") or ""
+            if fetch.get("status") and fetch.get("status") >= 400:
+                continue
+            if _is_parked_domain(html, headers):
+                excluded_count += 1
+                continue
+            score, reasons = score_website_candidate(candidate, lead, html, headers, fetched_url)
+            if score > best_score:
+                best_score = score
+                best_candidate = candidate
+                best_reasons = reasons
+                best_query = candidate.get("search_term") or ""
+        rank_ms = int((time.time() - rank_start) * 1000)
+
+        method = ""
+        website_url = ""
+        if best_candidate and best_score >= DISCOVERY_MIN_SCORE:
+            website_url = best_candidate.get("url") or ""
+            source = best_candidate.get("source") or ""
+            if source == "email_domain":
+                method = "EMAIL_DOMAIN"
+            elif source == "social_anchor":
+                method = "SOCIAL_ANCHOR"
+            else:
+                method = "SERPER_SEARCH"
+
+        logger.info(
+            "discovery_timing cnpj=%s probe_ms=%s search_ms=%s rank_ms=%s candidates=%s",
+            lead.get("cnpj"),
+            probe_ms,
+            search_ms,
+            rank_ms,
+            len(deduped),
+        )
+
+        return {
+            "website_url": website_url,
+            "website_confidence": best_score,
+            "discovery_method": method,
+            "search_term_used": best_query,
+            "candidates_considered": len(deduped),
+            "excluded_candidates_count": excluded_count,
+            "website_match_reasons": best_reasons,
+            "instagram": instagram,
+            "linkedin_company": linkedin_company,
+            "linkedin_people": list(dict.fromkeys(linkedin_people))[:5],
+        }
+
     async def _enrich_one(self, session: aiohttp.ClientSession, lead: Dict[str, Any], run_id: str) -> Dict[str, Any]:
-        razao = lead.get("razao_social", "")
-        municipio = lead.get("municipio", "")
-        uf = lead.get("uf", "")
-        query = f"{razao} {municipio} {uf}".strip()
         result = {
             "cnpj": lead.get("cnpj"),
             "run_id": run_id,
@@ -148,25 +508,37 @@ class AsyncEnricher:
             "has_ecommerce": False,
             "has_chat": False,
             "signals": {},
+            "golden_techs_found": [],
+            "tech_sources": {},
             "fetched_url": None,
             "fetch_status": None,
             "fetch_ms": 0,
             "rendered_used": False,
             "cache_hit": False,
             "contact_quality": lead.get("contact_quality"),
+            "website_confidence": 0,
+            "discovery_method": "",
+            "search_term_used": "",
+            "candidates_considered": 0,
+            "website_match_reasons": [],
+            "excluded_candidates_count": 0,
             "notes": "",
         }
-
-        if not query:
-            return result
-
-        search_data = await self._search(session, query)
-        result.update({
-            "site": search_data.get("site"),
-            "instagram": search_data.get("instagram"),
-            "linkedin_company": search_data.get("linkedin_company"),
-            "linkedin_people": search_data.get("linkedin_people", []),
-        })
+        discovery = await self._discover_website(session, lead)
+        result.update(
+            {
+                "site": discovery.get("website_url"),
+                "website_confidence": discovery.get("website_confidence", 0),
+                "discovery_method": discovery.get("discovery_method", ""),
+                "search_term_used": discovery.get("search_term_used", ""),
+                "candidates_considered": discovery.get("candidates_considered", 0),
+                "website_match_reasons": discovery.get("website_match_reasons", []),
+                "excluded_candidates_count": discovery.get("excluded_candidates_count", 0),
+                "instagram": discovery.get("instagram"),
+                "linkedin_company": discovery.get("linkedin_company"),
+                "linkedin_people": discovery.get("linkedin_people", []),
+            }
+        )
 
         site = result.get("site")
         if site:
@@ -181,6 +553,8 @@ class AsyncEnricher:
             result["has_ecommerce"] = detection.get("has_ecommerce", False)
             result["has_chat"] = detection.get("has_chat", False)
             result["signals"] = detection.get("signals", {})
+            result["golden_techs_found"] = detection.get("golden_techs_found", [])
+            result["tech_sources"] = detection.get("tech_sources", {})
             result["fetched_url"] = detection.get("fetched_url")
             result["fetch_status"] = detection.get("fetch_status")
             result["fetch_ms"] = detection.get("fetch_ms") or 0
@@ -543,6 +917,50 @@ def _title_similarity(title: str, company: str) -> float:
     return max(token_overlap, seq_ratio)
 
 
+async def _fetch_candidate_html(
+    session: aiohttp.ClientSession,
+    url: str,
+    timeout_sec: int = DISCOVERY_TIMEOUT_SEC,
+) -> Dict[str, Any]:
+    start = time.time()
+    try:
+        async with session.get(url, headers=get_stealth_headers(), timeout=timeout_sec, allow_redirects=True) as resp:
+            html = await resp.text(errors="ignore")
+            fetch_ms = int((time.time() - start) * 1000)
+            headers = {k.lower(): v for k, v in resp.headers.items()}
+            return {
+                "html": html,
+                "headers": headers,
+                "status": resp.status,
+                "fetched_url": str(resp.url),
+                "fetch_ms": fetch_ms,
+            }
+    except Exception as exc:
+        return {
+            "html": "",
+            "headers": {},
+            "status": None,
+            "fetched_url": None,
+            "fetch_ms": int((time.time() - start) * 1000),
+            "error": str(exc),
+        }
+
+
+def _extract_external_link(html: str) -> Optional[str]:
+    if not html:
+        return None
+    for match in re.findall(r'href=[\"\\\'](https?://[^\"\\\']+)[\"\\\']', html, flags=re.IGNORECASE):
+        domain = _extract_domain(match)
+        if not domain:
+            continue
+        if any(site in domain for site in ("linkedin.com", "instagram.com", "facebook.com", "tiktok.com", "youtube.com")):
+            continue
+        if any(site in domain for site in ("wa.me", "api.whatsapp.com")):
+            continue
+        return match
+    return None
+
+
 async def _direct_fetch(
     session: aiohttp.ClientSession,
     domain: str,
@@ -613,11 +1031,19 @@ async def enrich_leads_hybrid(
             "has_ecommerce": False,
             "has_chat": False,
             "signals": {},
+            "golden_techs_found": [],
+            "tech_sources": {},
             "fetched_url": None,
             "fetch_status": None,
             "fetch_ms": 0,
             "rendered_used": False,
             "contact_quality": lead.get("contact_quality"),
+            "website_confidence": 0,
+            "discovery_method": "",
+            "search_term_used": "",
+            "candidates_considered": 0,
+            "website_match_reasons": [],
+            "excluded_candidates_count": 0,
             "notes": "",
         }
         try:
@@ -682,6 +1108,8 @@ async def enrich_leads_hybrid(
                 result["has_ecommerce"] = direct_analysis.get("has_ecommerce", False)
                 result["has_chat"] = direct_analysis.get("has_chat", False)
                 result["signals"] = direct_analysis.get("signals", {})
+                result["golden_techs_found"] = direct_analysis.get("golden_techs_found", [])
+                result["tech_sources"] = direct_analysis.get("tech_sources", {})
                 result["tech_stack"] = {
                     "detected_stack": direct_analysis.get("detected_stack", []),
                     "has_whatsapp_link": direct_analysis.get("has_whatsapp_link", False),
@@ -695,6 +1123,8 @@ async def enrich_leads_hybrid(
                 result["has_ecommerce"] = detection.get("has_ecommerce", False)
                 result["has_chat"] = detection.get("has_chat", False)
                 result["signals"] = detection.get("signals", {})
+                result["golden_techs_found"] = detection.get("golden_techs_found", [])
+                result["tech_sources"] = detection.get("tech_sources", {})
                 result["fetched_url"] = detection.get("fetched_url")
                 result["fetch_status"] = detection.get("fetch_status")
                 result["fetch_ms"] = detection.get("fetch_ms") or 0

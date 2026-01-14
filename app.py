@@ -797,8 +797,9 @@ def _render_vault() -> None:
                         lead = lead_map.get(item.get("cnpj"))
                         if not lead:
                             continue
-                        score = scoring.score_v2(lead, item)
+                        score, reasons, version = scoring.score_with_reasons(lead, item)
                         storage.update_lead_scores(lead["cnpj"], score, scoring.label(score))
+                        storage.update_enrichment_scoring(lead["cnpj"], version, reasons)
 
                     storage.update_run(
                         run_id,

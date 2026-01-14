@@ -148,6 +148,24 @@ def _format_socios(value: Any) -> str:
     return ", ".join(formatted)
 
 
+def _format_list(value: Any) -> str:
+    if value is None or value == "":
+        return ""
+    if isinstance(value, list):
+        return ", ".join([str(item) for item in value if item])
+    if isinstance(value, dict):
+        return json.dumps(value, ensure_ascii=False)
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return value
+        if isinstance(parsed, list):
+            return ", ".join([str(item) for item in parsed if item])
+        return json.dumps(parsed, ensure_ascii=False)
+    return str(value)
+
+
 def format_export_data(
     rows: List[Dict[str, Any]],
     socios_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
@@ -169,6 +187,16 @@ def format_export_data(
         "site",
         "instagram",
         "linkedin_company",
+        "search_term_used",
+        "discovery_method",
+        "website_confidence",
+        "website_match_reasons",
+        "candidates_considered",
+        "excluded_candidates_count",
+        "golden_techs_found",
+        "tech_sources",
+        "score_version",
+        "score_reasons",
     ]:
         if col not in df.columns:
             df[col] = ""
@@ -231,5 +259,22 @@ def format_export_data(
         "Cidade/UF",
         "Stack Tecnol\u00f3gico",
         "Links",
+        "search_term_used",
+        "discovery_method",
+        "website_confidence",
+        "website_match_reasons",
+        "candidates_considered",
+        "excluded_candidates_count",
+        "golden_techs_found",
+        "tech_sources",
+        "score_version",
+        "score_reasons",
     ]
+    for col in [
+        "website_match_reasons",
+        "golden_techs_found",
+        "tech_sources",
+        "score_reasons",
+    ]:
+        df[col] = df[col].apply(_format_list)
     return df[export_columns]
