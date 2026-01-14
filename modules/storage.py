@@ -1256,7 +1256,7 @@ def fetch_socios_by_cnpjs(cnpjs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
     placeholders = ",".join(["?"] * len(cnpjs))
     with get_conn() as conn:
         rows = conn.execute(
-            f"SELECT cnpj, nome_socio, qualificacao FROM socios WHERE cnpj IN ({placeholders})",
+            f"SELECT cnpj, nome_socio, qualificacao, cpf FROM socios WHERE cnpj IN ({placeholders})",
             cnpjs,
         ).fetchall()
     result: Dict[str, List[Dict[str, Any]]] = {}
@@ -1265,6 +1265,7 @@ def fetch_socios_by_cnpjs(cnpjs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
             {
                 "nome_socio": row["nome_socio"],
                 "qualificacao": row["qualificacao"],
+                "cpf": row["cpf"],
             }
         )
     return result

@@ -668,6 +668,47 @@ def _render_vault() -> None:
 
     _micro_label("FILTROS")
     with st.container(border=True):
+        import inspect
+
+        def _count_vault(filters: Dict[str, Any], status_filter: str) -> int:
+            if hasattr(storage, "count_vault_data"):
+                return storage.count_vault_data(filters, status_filter=status_filter)
+            kwargs = {
+                "min_score": filters.get("min_score"),
+                "min_tech_score": filters.get("min_tech_score"),
+                "contact_quality": filters.get("contact_quality"),
+                "municipio": filters.get("municipio"),
+            }
+            if "status_filter" in inspect.signature(storage.count_enrichment_vault).parameters:
+                kwargs["status_filter"] = status_filter
+            return storage.count_enrichment_vault(**kwargs)
+
+        def _fetch_vault(
+            page: int,
+            page_size: int,
+            filters: Dict[str, Any],
+            status_filter: str,
+        ) -> List[Dict[str, Any]]:
+            if hasattr(storage, "get_vault_data"):
+                return storage.get_vault_data(
+                    page=page,
+                    page_size=page_size,
+                    filters=filters,
+                    status_filter=status_filter,
+                )
+            offset = max(0, (page - 1) * page_size)
+            kwargs = {
+                "min_score": filters.get("min_score"),
+                "min_tech_score": filters.get("min_tech_score"),
+                "contact_quality": filters.get("contact_quality"),
+                "municipio": filters.get("municipio"),
+                "limit": page_size,
+                "offset": offset,
+            }
+            if "status_filter" in inspect.signature(storage.query_enrichment_vault).parameters:
+                kwargs["status_filter"] = status_filter
+            return storage.query_enrichment_vault(**kwargs)
+
         status_labels = ["Todos", "🟣 Enriquecidos", "⚪ Pendentes"]
         status_label = st.radio("Status", options=status_labels, horizontal=True, key="vault_status_filter")
         status_filter_map = {"Todos": "all", "🟣 Enriquecidos": "enriched", "⚪ Pendentes": "pending"}
@@ -702,8 +743,8 @@ def _render_vault() -> None:
             "municipio": filter_municipio,
         }
 
-        filtered_total = storage.count_vault_data(filters, status_filter=status_filter)
-        pending_total = storage.count_vault_data(filters, status_filter="pending")
+        filtered_total = _count_vault(filters, status_filter=status_filter)
+        pending_total = _count_vault(filters, status_filter="pending")
         max_page = max(1, math.ceil(filtered_total / page_size)) if page_size else 1
         current_page = int(st.session_state.get("vault_page", 1))
         if current_page > max_page:
@@ -719,7 +760,7 @@ def _render_vault() -> None:
                 key="vault_page",
             )
 
-    vault_rows = storage.get_vault_data(
+    vault_rows = _fetch_vault(
         page=page,
         page_size=page_size,
         filters=filters,
@@ -863,6 +904,12 @@ def _render_vault() -> None:
     with st.container(border=True):
         col_a, col_b = st.columns([2, 3], gap="medium")
         with col_a:
+            csv_type = st.selectbox(
+                "Tipo de CSV",
+                options=["Comercial", "Debug"],
+                index=0,
+                key="vault_csv_type",
+            )
             export_scope = st.radio(
                 "Exportar CSV",
                 options=["Pagina atual", "Todos filtrados", "Selecionados"],
@@ -881,7 +928,8 @@ def _render_vault() -> None:
 
             cnpjs = [row.get("cnpj") for row in export_rows if row.get("cnpj")]
             socios_map = storage.fetch_socios_by_cnpjs(cnpjs)
-            export_df = webhook_exports.format_export_data(export_rows, socios_map=socios_map)
+            export_mode = "debug" if csv_type == "Debug" else "commercial"
+            export_df = webhook_exports.format_export_data(export_rows, socios_map=socios_map, mode=export_mode)
             export_suffix = {
                 "Pagina atual": "pagina",
                 "Todos filtrados": "completo",

@@ -116,17 +116,6 @@ def _stack_summary(value: Any) -> str:
     return ", ".join(stack[:10])
 
 
-def _format_links(site: str, instagram: str, linkedin: str) -> str:
-    links = [item for item in [site, instagram, linkedin] if item]
-    return " | ".join(links)
-
-
-def _format_city_uf(municipio: str, uf: str) -> str:
-    if municipio and uf:
-        return f"{municipio}/{uf}"
-    return municipio or uf or ""
-
-
 def _format_socios(value: Any) -> str:
     socios = _coerce_list(value)
     if not socios:
@@ -166,9 +155,54 @@ def _format_list(value: Any) -> str:
     return str(value)
 
 
+def _parse_json(value: Any) -> Dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return {}
+        return parsed if isinstance(parsed, dict) else {}
+    return {}
+
+
+def _flatten_flags(value: Any) -> str:
+    flags = _parse_json(value)
+    if not flags:
+        return ""
+    enabled = [key for key, val in flags.items() if val]
+    return ", ".join(sorted(enabled))
+
+
+def _flag_value(value: Any, key: str) -> str:
+    flags = _parse_json(value)
+    return "true" if flags.get(key) else ""
+
+
+def _format_emails(value: Any) -> str:
+    items = _coerce_list(value)
+    return ", ".join([str(item) for item in items if item])
+
+
+def _format_cpfs(value: Any) -> str:
+    socios = _coerce_list(value)
+    if not socios:
+        return ""
+    cpfs = []
+    for socio in socios:
+        if isinstance(socio, dict):
+            cpf = socio.get("cpf") or ""
+            if cpf:
+                cpfs.append(cpf)
+    return ", ".join(cpfs)
+
 def format_export_data(
     rows: List[Dict[str, Any]],
     socios_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+    mode: str = "commercial",
 ) -> pd.DataFrame:
     df = pd.DataFrame(rows)
     if df.empty:
@@ -178,6 +212,9 @@ def format_export_data(
         "cnpj",
         "razao_social",
         "nome_fantasia",
+        "cnae_desc",
+        "porte",
+        "endereco_norm",
         "municipio",
         "uf",
         "telefones_norm",
@@ -197,6 +234,10 @@ def format_export_data(
         "tech_sources",
         "score_version",
         "score_reasons",
+        "flags_json",
+        "score_label",
+        "score_v2",
+        "google_maps_url",
     ]:
         if col not in df.columns:
             df[col] = ""
@@ -231,45 +272,58 @@ def format_export_data(
 
     df["Link WhatsApp"] = df["telefones_norm"].apply(make_wa)
     df["Telefones"] = df["telefones_norm"].apply(make_phones)
-    df["E-mail"] = df["emails_norm"].apply(make_email)
-    df["S\u00f3cios"] = df.apply(
+    df["E-mails"] = df["emails_norm"].apply(_format_emails)
+    df["socios"] = df.apply(
         lambda row: make_socios(row.get("cnpj", ""), row.get("socios_json", "")),
         axis=1,
     )
-    df["Empresa"] = df.apply(
-        lambda row: row.get("razao_social") or row.get("nome_fantasia") or "",
+    df["cpf"] = df.apply(
+        lambda row: _format_cpfs(socios_map.get(row.get("cnpj"), [])) if socios_map else "",
         axis=1,
     )
-    df["Cidade/UF"] = df.apply(
-        lambda row: _format_city_uf(row.get("municipio", ""), row.get("uf", "")),
-        axis=1,
-    )
+    df["cidade"] = df["municipio"]
     df["Stack Tecnol\u00f3gico"] = df["tech_stack_json"].apply(_stack_summary)
-    df["Links"] = df.apply(
-        lambda row: _format_links(row.get("site", ""), row.get("instagram", ""), row.get("linkedin_company", "")),
-        axis=1,
-    )
+    df["whatsapp_probable"] = df["flags_json"].apply(lambda value: _flag_value(value, "whatsapp_probable"))
+    df["flags achatadas"] = df["flags_json"].apply(_flatten_flags)
+    df["score"] = df["score_v2"]
 
     export_columns = [
-        "Empresa",
+        "cnpj",
+        "nome_fantasia",
+        "razao_social",
+        "cnae_desc",
+        "porte",
+        "cidade",
+        "uf",
+        "endereco_norm",
+        "whatsapp_probable",
         "Link WhatsApp",
         "Telefones",
-        "S\u00f3cios",
-        "E-mail",
-        "Cidade/UF",
+        "E-mails",
+        "socios",
+        "cpf",
+        "site",
+        "instagram",
+        "linkedin_company",
+        "google_maps_url",
+        "score_label",
+        "score_version",
+        "score",
+        "score_reasons",
+        "flags achatadas",
         "Stack Tecnol\u00f3gico",
-        "Links",
+        "golden_techs_found",
+    ]
+    debug_columns = [
         "search_term_used",
         "discovery_method",
         "website_confidence",
         "website_match_reasons",
         "candidates_considered",
         "excluded_candidates_count",
-        "golden_techs_found",
         "tech_sources",
-        "score_version",
-        "score_reasons",
     ]
+
     for col in [
         "website_match_reasons",
         "golden_techs_found",
@@ -277,4 +331,6 @@ def format_export_data(
         "score_reasons",
     ]:
         df[col] = df[col].apply(_format_list)
-    return df[export_columns]
+
+    columns = export_columns + (debug_columns if mode == "debug" else [])
+    return df[columns]
