@@ -1048,7 +1048,8 @@ def fetch_enrichment_vault(limit: int = 100, offset: int = 0) -> List[Dict[str, 
         rows = conn.execute(
             """
             SELECT e.*, c.razao_social, c.nome_fantasia, c.cnae, c.municipio, c.uf,
-                   c.score_v2, c.score_label, c.contact_quality
+                   c.score_v2, c.score_label, c.contact_quality, c.telefones_norm,
+                   c.emails_norm, c.flags_json, c.porte, c.endereco_norm
             FROM enrichments e
             LEFT JOIN leads_clean c ON c.cnpj = e.cnpj
             ORDER BY e.enriched_at DESC
@@ -1056,6 +1057,78 @@ def fetch_enrichment_vault(limit: int = 100, offset: int = 0) -> List[Dict[str, 
             """,
             (limit, offset),
         ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def _build_vault_filters(
+    filters: Dict[str, Any],
+    status_filter: str = "all",
+) -> Tuple[str, List[Any]]:
+    clauses = []
+    params: List[Any] = []
+    min_score = filters.get("min_score")
+    min_tech_score = filters.get("min_tech_score")
+    contact_quality = filters.get("contact_quality")
+    municipio = filters.get("municipio")
+    uf = filters.get("uf")
+    has_marketing = filters.get("has_marketing")
+
+    if min_score is not None:
+        clauses.append("lc.score_v2 >= ?")
+        params.append(min_score)
+    if min_tech_score is not None:
+        clauses.append("e.tech_score >= ?")
+        params.append(min_tech_score)
+    if contact_quality:
+        clauses.append("lc.contact_quality = ?")
+        params.append(contact_quality)
+    if municipio:
+        clauses.append("lc.municipio = ?")
+        params.append(municipio)
+    if uf:
+        clauses.append("lc.uf = ?")
+        params.append(uf)
+    if has_marketing is not None:
+        clauses.append("e.has_marketing = ?")
+        params.append(1 if has_marketing else 0)
+    if status_filter == "enriched":
+        clauses.append("e.enriched_at IS NOT NULL")
+    elif status_filter == "pending":
+        clauses.append("e.enriched_at IS NULL")
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    return where_sql, params
+
+
+def _vault_select_sql() -> str:
+    return (
+        "SELECT "
+        "lc.cnpj, lc.razao_social, lc.nome_fantasia, lc.cnae, lc.cnae_desc, lc.porte, "
+        "lc.natureza_juridica, lc.capital_social, lc.municipio, lc.uf, lc.endereco_norm, "
+        "lc.telefones_norm, lc.emails_norm, lc.flags_json, lc.score_v1, lc.score_v2, "
+        "lc.score_label, lc.contact_quality, lc.updated_at, "
+        "e.run_id, e.site, e.instagram, e.linkedin_company, e.linkedin_people_json, "
+        "e.google_maps_url, e.has_contact_page, e.has_form, e.tech_stack_json, "
+        "e.tech_score, e.tech_confidence, e.has_marketing, e.has_analytics, "
+        "e.has_ecommerce, e.has_chat, e.signals_json, e.fetched_url, e.fetch_status, "
+        "e.fetch_ms, e.rendered_used, e.notes, e.enriched_at "
+        "FROM leads_clean lc LEFT JOIN enrichments e ON lc.cnpj = e.cnpj "
+    )
+
+
+def get_vault_data(
+    page: int,
+    page_size: int,
+    filters: Dict[str, Any],
+    status_filter: str = "all",
+) -> List[Dict[str, Any]]:
+    where_sql, params = _build_vault_filters(filters, status_filter)
+    order_sql = "ORDER BY (e.enriched_at IS NULL) ASC, e.enriched_at DESC, lc.score_v2 DESC"
+    offset = max(0, (page - 1) * page_size)
+    sql = f"{_vault_select_sql()} {where_sql} {order_sql} LIMIT ? OFFSET ?"
+    params.extend([page_size, offset])
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
     return [dict(row) for row in rows]
 
 
@@ -1067,32 +1140,18 @@ def query_enrichment_vault(
     has_marketing: Optional[bool] = None,
     limit: int = 100,
     offset: int = 0,
+    status_filter: str = "enriched",
 ) -> List[Dict[str, Any]]:
-    clauses = []
-    params: List[Any] = []
-    if min_score is not None:
-        clauses.append("c.score_v2 >= ?")
-        params.append(min_score)
-    if min_tech_score is not None:
-        clauses.append("e.tech_score >= ?")
-        params.append(min_tech_score)
-    if contact_quality:
-        clauses.append("c.contact_quality = ?")
-        params.append(contact_quality)
-    if municipio:
-        clauses.append("c.municipio = ?")
-        params.append(municipio)
-    if has_marketing is not None:
-        clauses.append("e.has_marketing = ?")
-        params.append(1 if has_marketing else 0)
-
-    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = (
-        "SELECT e.*, c.razao_social, c.nome_fantasia, c.cnae, c.municipio, c.uf, "
-        "c.score_v2, c.score_label, c.contact_quality "
-        "FROM enrichments e LEFT JOIN leads_clean c ON c.cnpj = e.cnpj "
-        f"{where_sql} ORDER BY e.enriched_at DESC LIMIT ? OFFSET ?"
-    )
+    filters = {
+        "min_score": min_score,
+        "min_tech_score": min_tech_score,
+        "contact_quality": contact_quality,
+        "municipio": municipio,
+        "has_marketing": has_marketing,
+    }
+    where_sql, params = _build_vault_filters(filters, status_filter)
+    order_sql = "ORDER BY (e.enriched_at IS NULL) ASC, e.enriched_at DESC, lc.score_v2 DESC"
+    sql = f"{_vault_select_sql()} {where_sql} {order_sql} LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     with get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
@@ -1105,30 +1164,24 @@ def count_enrichment_vault(
     contact_quality: Optional[str] = None,
     municipio: Optional[str] = None,
     has_marketing: Optional[bool] = None,
+    status_filter: str = "enriched",
 ) -> int:
-    clauses = []
-    params: List[Any] = []
-    if min_score is not None:
-        clauses.append("c.score_v2 >= ?")
-        params.append(min_score)
-    if min_tech_score is not None:
-        clauses.append("e.tech_score >= ?")
-        params.append(min_tech_score)
-    if contact_quality:
-        clauses.append("c.contact_quality = ?")
-        params.append(contact_quality)
-    if municipio:
-        clauses.append("c.municipio = ?")
-        params.append(municipio)
-    if has_marketing is not None:
-        clauses.append("e.has_marketing = ?")
-        params.append(1 if has_marketing else 0)
+    filters = {
+        "min_score": min_score,
+        "min_tech_score": min_tech_score,
+        "contact_quality": contact_quality,
+        "municipio": municipio,
+        "has_marketing": has_marketing,
+    }
+    return count_vault_data(filters, status_filter=status_filter)
 
-    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
-    sql = (
-        "SELECT COUNT(*) AS cnt FROM enrichments e LEFT JOIN leads_clean c ON c.cnpj = e.cnpj "
-        f"{where_sql}"
-    )
+
+def count_vault_data(
+    filters: Dict[str, Any],
+    status_filter: str = "all",
+) -> int:
+    where_sql, params = _build_vault_filters(filters, status_filter)
+    sql = f"SELECT COUNT(*) AS cnt FROM leads_clean lc LEFT JOIN enrichments e ON lc.cnpj = e.cnpj {where_sql}"
     with get_conn() as conn:
         row = conn.execute(sql, params).fetchone()
     return int(row["cnt"])
@@ -1159,6 +1212,38 @@ def fetch_enrichments_by_cnpjs(cnpjs: List[str]) -> Dict[str, Dict[str, Any]]:
     for row in rows:
         result[row["cnpj"]] = dict(row)
     return result
+
+
+def fetch_socios_by_cnpjs(cnpjs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
+    if not cnpjs:
+        return {}
+    placeholders = ",".join(["?"] * len(cnpjs))
+    with get_conn() as conn:
+        rows = conn.execute(
+            f"SELECT cnpj, nome_socio, qualificacao FROM socios WHERE cnpj IN ({placeholders})",
+            cnpjs,
+        ).fetchall()
+    result: Dict[str, List[Dict[str, Any]]] = {}
+    for row in rows:
+        result.setdefault(row["cnpj"], []).append(
+            {
+                "nome_socio": row["nome_socio"],
+                "qualificacao": row["qualificacao"],
+            }
+        )
+    return result
+
+
+def update_lead_scores(cnpj: str, score_v2: int, score_label: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            UPDATE leads_clean
+            SET score_v2 = ?, score_label = ?, updated_at = ?
+            WHERE cnpj = ?
+            """,
+            (score_v2, score_label, _utcnow(), cnpj),
+        )
 
 
 def record_export(filters: Dict[str, Any], row_count: int, file_path: str) -> str:

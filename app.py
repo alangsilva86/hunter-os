@@ -1,5 +1,6 @@
 """Hunter OS v3 - Sniper Elite Console."""
 
+import asyncio
 import html
 import json
 import logging
@@ -22,7 +23,7 @@ except Exception:
     pass
 
 from etl_pipeline import HunterOrchestrator
-from modules import data_sources, exports as webhook_exports, storage
+from modules import data_sources, enrichment_async, exports as webhook_exports, providers, scoring, storage
 
 
 st.set_page_config(
@@ -132,98 +133,60 @@ def _stack_tags(tech_stack_json: Optional[str]) -> str:
     return " ".join(tags)
 
 
-def _stack_summary(tech_stack_json: Optional[str]) -> str:
-    parsed = _parse_json(tech_stack_json)
-    stack: List[str] = []
-    if isinstance(parsed, dict):
-        stack = parsed.get("detected_stack") or parsed.get("stack") or []
-    elif isinstance(parsed, list):
-        stack = parsed
-    if not stack:
-        return ""
-    return ", ".join(stack[:10])
-
-
-def _build_export_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
-    df = pd.DataFrame(rows)
-    if df.empty:
-        return df
-    df["stack_resumo"] = df["tech_stack_json"].apply(_stack_summary) if "tech_stack_json" in df.columns else ""
-    export_columns = [
-        "cnpj",
-        "run_id",
-        "site",
-        "instagram",
-        "linkedin_company",
-        "linkedin_people_json",
-        "google_maps_url",
-        "has_contact_page",
-        "has_form",
-        "tech_stack_json",
-        "tech_score",
-        "contact_quality",
-        "notes",
-        "enriched_at",
-        "tech_confidence",
-        "has_marketing",
-        "has_analytics",
-        "has_ecommerce",
-        "has_chat",
-        "signals_json",
-        "fetched_url",
-        "fetch_status",
-        "fetch_ms",
-        "rendered_used",
-        "razao_social",
-        "nome_fantasia",
-        "cnae",
-        "municipio",
-        "uf",
-        "score_v2",
-        "score_label",
-        "stack_resumo",
-    ]
-    for column in export_columns:
-        if column not in df.columns:
-            df[column] = ""
-    return df[export_columns]
+def _parse_json_list(value: Any) -> List[Any]:
+    if value is None or value == "":
+        return []
+    if isinstance(value, list):
+        return value
+    if isinstance(value, str):
+        try:
+            parsed = json.loads(value)
+        except Exception:
+            return [value]
+        if parsed is None:
+            return []
+        if isinstance(parsed, list):
+            return parsed
+        return [parsed]
+    return [value]
 
 
 def _fetch_all_vault_rows(
-    min_score: Optional[int],
-    min_tech_score: Optional[int],
-    contact_quality: Optional[str],
-    municipio: Optional[str],
-    has_marketing: Optional[bool] = None,
+    filters: Dict[str, Any],
+    status_filter: str,
     batch_size: int = 500,
 ) -> List[Dict[str, Any]]:
     all_rows: List[Dict[str, Any]] = []
-    offset = 0
+    page = 1
     while True:
-        batch = storage.query_enrichment_vault(
-            min_score=min_score,
-            min_tech_score=min_tech_score,
-            contact_quality=contact_quality,
-            municipio=municipio,
-            has_marketing=has_marketing,
-            limit=batch_size,
-            offset=offset,
+        batch = storage.get_vault_data(
+            page=page,
+            page_size=batch_size,
+            filters=filters,
+            status_filter=status_filter,
         )
         if not batch:
             break
         all_rows.extend(batch)
         if len(batch) < batch_size:
             break
-        offset += batch_size
+        page += 1
     return all_rows
 
 
 def _status_label(score: Optional[int]) -> str:
-    score = int(score or 0)
-    if score >= 85:
+    if pd.isna(score):
+        return "🔴 FRIO"
+    try:
+        score_value = int(float(score))
+    except (TypeError, ValueError):
+        return "🔴 FRIO"
+    if score_value >= 85:
         return "🟢 HOT"
-    if score >= 70:
+    if score_value >= 70:
         return "🟡 QUALIFICADO"
+    if score_value >= 55:
+        return "🟠 POTENCIAL"
     return "🔴 FRIO"
 
 
@@ -705,6 +668,10 @@ def _render_vault() -> None:
 
     _micro_label("FILTROS")
     with st.container(border=True):
+        status_labels = ["Todos", "🟣 Enriquecidos", "⚪ Pendentes"]
+        status_label = st.radio("Status", options=status_labels, horizontal=True, key="vault_status_filter")
+        status_filter_map = {"Todos": "all", "🟣 Enriquecidos": "enriched", "⚪ Pendentes": "pending"}
+        status_filter = status_filter_map[status_label]
         col_f1, col_f2 = st.columns(2, gap="medium")
         with col_f1:
             min_score = st.number_input("Score minimo", min_value=0, max_value=100, value=0)
@@ -723,18 +690,20 @@ def _render_vault() -> None:
                 index=2,
                 key="vault_page_size",
             )
-
         filter_min_score = min_score if min_score > 0 else None
         filter_min_tech = min_tech_score if min_tech_score > 0 else None
         filter_contact = contact_quality or None
         filter_municipio = municipio or None
 
-        filtered_total = storage.count_enrichment_vault(
-            min_score=filter_min_score,
-            min_tech_score=filter_min_tech,
-            contact_quality=filter_contact,
-            municipio=filter_municipio,
-        )
+        filters = {
+            "min_score": filter_min_score,
+            "min_tech_score": filter_min_tech,
+            "contact_quality": filter_contact,
+            "municipio": filter_municipio,
+        }
+
+        filtered_total = storage.count_vault_data(filters, status_filter=status_filter)
+        pending_total = storage.count_vault_data(filters, status_filter="pending")
         max_page = max(1, math.ceil(filtered_total / page_size)) if page_size else 1
         current_page = int(st.session_state.get("vault_page", 1))
         if current_page > max_page:
@@ -750,13 +719,11 @@ def _render_vault() -> None:
                 key="vault_page",
             )
 
-    vault_rows = storage.query_enrichment_vault(
-        min_score=filter_min_score,
-        min_tech_score=filter_min_tech,
-        contact_quality=filter_contact,
-        municipio=filter_municipio,
-        limit=page_size,
-        offset=(page - 1) * page_size,
+    vault_rows = storage.get_vault_data(
+        page=page,
+        page_size=page_size,
+        filters=filters,
+        status_filter=status_filter,
     )
 
     if not vault_rows:
@@ -765,9 +732,87 @@ def _render_vault() -> None:
 
     shown_count = len(vault_rows)
     if filtered_total:
-        st.caption(f"Mostrando {shown_count} de {filtered_total} leads enriquecidos. Pagina {page} de {max_page}.")
+        st.caption(f"Mostrando {shown_count} de {filtered_total} leads. Pagina {page} de {max_page}.")
+
+    if pending_total and status_filter in {"all", "pending"}:
+        col_info, col_btn = st.columns([3, 1])
+        with col_info:
+            st.caption(f"Leads aguardando enriquecimento: {pending_total}")
+        with col_btn:
+            if st.button("⚡ Enriquecer Lote (Proximos 50)", type="primary", key="vault_enrich_batch"):
+                pending_rows = storage.get_vault_data(
+                    page=1,
+                    page_size=50,
+                    filters=filters,
+                    status_filter="pending",
+                )
+                if not pending_rows:
+                    st.toast("Nao ha leads pendentes para enriquecer.", icon="✅")
+                else:
+                    leads: List[Dict[str, Any]] = []
+                    lead_map: Dict[str, Dict[str, Any]] = {}
+                    for row in pending_rows:
+                        lead = {
+                            "cnpj": row.get("cnpj"),
+                            "razao_social": row.get("razao_social"),
+                            "nome_fantasia": row.get("nome_fantasia"),
+                            "municipio": row.get("municipio"),
+                            "uf": row.get("uf"),
+                            "porte": row.get("porte"),
+                            "contact_quality": row.get("contact_quality"),
+                            "flags": _parse_json(row.get("flags_json")),
+                            "emails_norm": _parse_json_list(row.get("emails_norm")),
+                        }
+                        leads.append(lead)
+                        if lead.get("cnpj"):
+                            lead_map[lead["cnpj"]] = lead
+
+                    run_id = storage.create_run(
+                        {
+                            "source": "vault_manual",
+                            "batch_size": len(leads),
+                            "filters": filters,
+                        }
+                    )
+                    storage.update_run(run_id, status="running", total_leads=len(leads))
+                    provider = providers.select_provider(_env("SEARCH_PROVIDER", "serper"))
+                    enricher = enrichment_async.AsyncEnricher(
+                        provider=provider,
+                        concurrency=int(_env("CONCURRENCY", "10")),
+                        timeout=int(_env("TIMEOUT", "5")),
+                        cache_ttl_hours=int(_env("CACHE_TTL_HOURS", "24")),
+                    )
+                    with st.spinner("Enriquecendo leads pendentes..."):
+                        try:
+                            enriched_results, enrich_stats = asyncio.run(enricher.enrich_batch(leads, run_id))
+                        except Exception as exc:
+                            storage.update_run(run_id, status="failed")
+                            st.error("Falha ao processar o lote de enriquecimento.")
+                            logger.warning("vault_enrich_batch failed: %s", exc)
+                            enriched_results = []
+                            enrich_stats = {"errors_count": len(leads)}
+
+                    for item in enriched_results:
+                        storage.upsert_enrichment(item.get("cnpj"), item)
+                        lead = lead_map.get(item.get("cnpj"))
+                        if not lead:
+                            continue
+                        score = scoring.score_v2(lead, item)
+                        storage.update_lead_scores(lead["cnpj"], score, scoring.label(score))
+
+                    storage.update_run(
+                        run_id,
+                        status="completed",
+                        enriched_count=len(enriched_results),
+                        errors_count=enrich_stats.get("errors_count", 0),
+                    )
+                    st.success("Processamento iniciado! Atualizando a lista...")
+                    st.rerun()
 
     df_vault = pd.DataFrame(vault_rows)
+    df_vault["enrichment_status"] = df_vault["enriched_at"].apply(
+        lambda value: "🟣 ENRIQUECIDO" if value else "⚪ PENDENTE"
+    )
     df_vault["status_label"] = df_vault["score_v2"].apply(_status_label)
     df_vault["stack_tags"] = df_vault["tech_stack_json"].apply(_stack_tags)
     df_vault["site_link"] = df_vault["site"].fillna("")
@@ -778,6 +823,7 @@ def _render_vault() -> None:
     display_cols = [
         "cnpj",
         "razao_social",
+        "enrichment_status",
         "status_label",
         "score_v2",
         "stack_tags",
@@ -797,7 +843,8 @@ def _render_vault() -> None:
         column_config={
             "selecionar": st.column_config.CheckboxColumn("Selecionar"),
             "razao_social": st.column_config.TextColumn("Razao Social"),
-            "status_label": st.column_config.TextColumn("Status"),
+            "enrichment_status": st.column_config.TextColumn("Status"),
+            "status_label": st.column_config.TextColumn("Qualidade"),
             "score_v2": st.column_config.ProgressColumn("Score", min_value=0, max_value=100),
             "stack_tags": st.column_config.TextColumn("Tech Stack"),
             "site_link": st.column_config.LinkColumn("Site", display_text="🔗"),
@@ -825,18 +872,15 @@ def _render_vault() -> None:
                 st.caption("Selecione ao menos um lead para exportar.")
 
             if export_scope == "Todos filtrados":
-                export_rows = _fetch_all_vault_rows(
-                    min_score=filter_min_score,
-                    min_tech_score=filter_min_tech,
-                    contact_quality=filter_contact,
-                    municipio=filter_municipio,
-                )
+                export_rows = _fetch_all_vault_rows(filters, status_filter)
             elif export_scope == "Selecionados":
                 export_rows = selected_payload
             else:
                 export_rows = df_vault.to_dict(orient="records")
 
-            export_df = _build_export_df(export_rows)
+            cnpjs = [row.get("cnpj") for row in export_rows if row.get("cnpj")]
+            socios_map = storage.fetch_socios_by_cnpjs(cnpjs)
+            export_df = webhook_exports.format_export_data(export_rows, socios_map=socios_map)
             export_suffix = {
                 "Pagina atual": "pagina",
                 "Todos filtrados": "completo",
