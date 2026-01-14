@@ -152,40 +152,36 @@ def _escape(text: str) -> str:
 
 
 def _render_empty_state() -> None:
-    svg = (
-        "<svg width='120' height='120' viewBox='0 0 120 120' fill='none' xmlns='http://www.w3.org/2000/svg'>"
-        "<rect x='10' y='18' width='100' height='84' rx='12' stroke='#27272A' stroke-width='2'/>"
-        "<path d='M24 42H96' stroke='#27272A' stroke-width='2'/>"
-        "<path d='M24 60H72' stroke='#27272A' stroke-width='2'/>"
-        "<circle cx='86' cy='64' r='10' stroke='#27272A' stroke-width='2'/>"
-        "</svg>"
-    )
-    st.markdown(
-        f"<div class='empty-state'>{svg}<div class='empty-state-text'>"
-        "O cofre esta vazio. Inicie uma caçada no Mission Control.</div></div>",
-        unsafe_allow_html=True,
-    )
+    st.info("Nenhum alvo detectado. Inicie a varredura no Mission Control.", icon="📡")
 
 
 def _inject_css() -> None:
     st.markdown(
         """
         <style>
+        @import url('https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;700&display=swap');
+
         :root {
-            --bg: #050505;
-            --surface: #121212;
-            --border: #2A2A2A;
+            --bg: #09090B;
+            --surface: #18181B;
+            --border: #27272A;
+            --input: #121212;
             --text-primary: #FAFAFA;
             --text-secondary: #A1A1AA;
-            --accent: #FF5500;
+            --accent: #F97316;
+            --accent-strong: #EA580C;
             --success: #10B981;
         }
+        * {
+            -webkit-font-smoothing: antialiased;
+            -moz-osx-font-smoothing: grayscale;
+        }
         html, body, [class*="css"]  {
-            font-family: -apple-system, BlinkMacSystemFont, "Inter", "Segoe UI", sans-serif;
+            font-family: "Inter", sans-serif;
         }
         .stApp {
-            background-color: #050505;
-            background-image: radial-gradient(circle at 50% 0%, #1a1a1a 0%, #050505 60%);
+            background-color: var(--bg);
+            background-image: radial-gradient(circle at 50% -20%, #1e1b4b 0%, var(--bg) 40%);
             color: var(--text-primary);
         }
         section[data-testid="stSidebar"] {
@@ -201,9 +197,9 @@ def _inject_css() -> None:
             position: sticky;
             top: 0;
             z-index: 1000;
-            background: rgba(9, 9, 11, 0.7);
-            border-bottom: 1px solid var(--border);
-            backdrop-filter: blur(10px);
+            background: rgba(24, 24, 27, 0.7);
+            border-bottom: 1px solid rgba(255, 255, 255, 0.08);
+            backdrop-filter: blur(16px);
             padding: 1.25rem 2rem 1rem 2rem;
             margin: -1.5rem -2rem 2rem -2rem;
         }
@@ -211,6 +207,7 @@ def _inject_css() -> None:
             font-weight: 700;
             font-size: 1.25rem;
             letter-spacing: 0.04em;
+            color: var(--text-primary);
         }
         .app-subtitle {
             color: var(--text-secondary);
@@ -224,51 +221,32 @@ def _inject_css() -> None:
             color: var(--text-secondary);
             margin-bottom: 0.35rem;
         }
-        div[data-testid="stButton"] > button {
-            border-radius: 8px;
-            font-weight: 600;
-            border: 1px solid var(--border);
-        }
-        div.stButton > button[kind="primary"] {
-            background: linear-gradient(180deg, #FF5500 0%, #CC4400 100%) !important;
-            color: #09090B !important;
-            border: none !important;
-            box-shadow: 0 0 15px rgba(255, 85, 0, 0.4);
-            transition: all 0.2s ease;
-            text-transform: uppercase;
-            letter-spacing: 0.12em;
-            padding: 0.9rem 1.2rem;
-        }
-        div.stButton > button[kind="primary"]:hover {
-            transform: scale(1.02);
-            box-shadow: 0 0 25px rgba(255, 85, 0, 0.6);
-        }
-        div.stButton > button[kind="primary"]:active {
-            transform: scale(0.98);
-        }
-        button[data-testid="baseButton-secondary"] {
-            background: #141414;
-            color: var(--text-primary);
-        }
-        button[data-testid="baseButton-secondary"]:hover {
-            border-color: rgba(255, 255, 255, 0.2);
-        }
         .nav-wrapper div[data-testid="stHorizontalBlock"] {
-            background: rgba(20, 20, 20, 0.6);
-            backdrop-filter: blur(12px);
+            background: rgba(24, 24, 27, 0.75);
+            backdrop-filter: blur(16px);
             border-radius: 16px;
-            padding: 10px;
+            padding: 10px 12px;
             border: 1px solid rgba(255, 255, 255, 0.08);
             position: sticky;
             top: 10px;
             z-index: 999;
             margin-bottom: 30px;
         }
-        div[data-baseweb="select"] > div {
-            background-color: #121212 !important;
-            border: 1px solid #333 !important;
-            color: white !important;
-            border-radius: 8px !important;
+        h1, h2, h3 {
+            font-family: "Inter", sans-serif;
+            letter-spacing: -0.025em;
+            color: var(--text-primary) !important;
+        }
+        p, span, label, small {
+            font-family: "Inter", sans-serif;
+            color: var(--text-secondary) !important;
+        }
+        div[data-testid="stForm"], div.css-card {
+            background-color: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            padding: 24px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.12);
         }
         div[data-testid="stVerticalBlockBorderWrapper"] {
             background: var(--surface);
@@ -276,41 +254,93 @@ def _inject_css() -> None:
             border-radius: 12px;
             padding: 1.1rem;
         }
+        input, textarea, div[data-baseweb="select"] > div {
+            background-color: var(--input) !important;
+            border: 1px solid var(--border) !important;
+            color: var(--text-primary) !important;
+            border-radius: 6px !important;
+            transition: border-color 0.2s, box-shadow 0.2s;
+        }
+        input:focus, textarea:focus, div[data-baseweb="select"] > div:focus-within {
+            border-color: var(--accent) !important;
+            box-shadow: 0 0 0 1px var(--accent);
+        }
+        div.stButton > button[kind="primary"], button[kind="primary"] {
+            background: var(--accent) !important;
+            color: #FFFFFF !important;
+            font-weight: 600 !important;
+            border-radius: 8px !important;
+            border: 1px solid rgba(255, 255, 255, 0.1) !important;
+            box-shadow: 0 1px 2px 0 rgba(0, 0, 0, 0.05);
+            transition: all 0.15s ease;
+        }
+        div.stButton > button[kind="primary"]:hover, button[kind="primary"]:hover {
+            background: var(--accent-strong) !important;
+            transform: translateY(-1px);
+        }
+        div.stButton > button[kind="secondary"], button[kind="secondary"] {
+            background: transparent !important;
+            border: 1px solid #3F3F46 !important;
+            color: #E4E4E7 !important;
+            border-radius: 8px !important;
+        }
+        div.stButton > button[kind="secondary"]:hover, button[kind="secondary"]:hover {
+            border-color: rgba(255, 255, 255, 0.25) !important;
+        }
         div[data-testid="stMetric"] {
-            background-color: #121212;
-            border: 1px solid #2A2A2A;
+            background-color: var(--surface);
+            border: 1px solid var(--border);
             padding: 20px;
             border-radius: 12px;
-            box-shadow: 0 4px 6px rgba(0,0,0,0.3);
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.12);
         }
         div[data-testid="stMetric"] label {
-            color: #888 !important;
+            color: var(--text-secondary) !important;
             font-size: 0.8rem !important;
             text-transform: uppercase;
+            letter-spacing: 0.08em;
         }
         div[data-testid="stMetricValue"] {
-            color: #FFF !important;
+            color: var(--text-primary) !important;
             font-size: 2rem !important;
             font-weight: 700;
             font-variant-numeric: tabular-nums;
         }
+        .kpi-card {
+            background-color: var(--surface);
+            border: 1px solid var(--border);
+            padding: 20px;
+            border-radius: 12px;
+            box-shadow: 0 4px 6px -1px rgba(0, 0, 0, 0.2), 0 2px 4px -1px rgba(0, 0, 0, 0.12);
+        }
+        .kpi-label {
+            color: var(--text-secondary);
+            font-size: 0.8rem;
+            text-transform: uppercase;
+            letter-spacing: 0.08em;
+            margin-bottom: 0.25rem;
+        }
+        .kpi-value {
+            font-size: 2rem;
+            font-weight: 700;
+            font-variant-numeric: tabular-nums;
+            color: var(--text-primary);
+        }
         div[data-testid="stDataFrame"] {
-            border: 1px solid #222;
+            border: 1px solid var(--border);
             border-radius: 8px;
             overflow: hidden;
         }
-        div[data-testid="stDataFrame"] thead tr th {
-            background: #27272A !important;
-            color: var(--text-secondary) !important;
+        div[data-testid="stDataFrame"] th {
+            background-color: var(--border) !important;
+            color: #E4E4E7 !important;
+            font-weight: 600;
+            border-bottom: 1px solid #3F3F46;
         }
-        div[data-testid="stDataFrame"] tbody tr:nth-child(odd) {
-            background: #09090B;
-        }
-        div[data-testid="stDataFrame"] tbody tr:nth-child(even) {
-            background: #121212;
-        }
-        .nav-buttons > div {
-            gap: 0.5rem;
+        div[data-testid="stDataFrame"] td {
+            background-color: var(--surface) !important;
+            color: #D4D4D8 !important;
+            border-bottom: 1px solid var(--border);
         }
         .timeline {
             display: flex;
@@ -342,21 +372,13 @@ def _inject_css() -> None:
             color: var(--text-primary);
             font-size: 0.95rem;
         }
-        .empty-state {
-            text-align: center;
-            padding: 3rem 1rem;
-            color: var(--text-secondary);
-        }
-        .empty-state-text {
-            margin-top: 1rem;
-            font-size: 0.95rem;
-        }
         .terminal {
-            background: #050505;
-            color: #10B981;
+            background: var(--bg);
+            color: var(--success);
             border-radius: 12px;
             padding: 1rem;
-            font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+            font-family: "JetBrains Mono", ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono",
+                "Courier New", monospace;
             font-size: 0.8rem;
             line-height: 1.4rem;
             border: 1px solid #0f0f0f;
@@ -414,14 +436,20 @@ def _render_mission_control() -> None:
     with col_a:
         with st.container(border=True):
             st.caption("Geografia")
-            uf = st.selectbox("UF", ["PR", "SP", "RJ", "MG", "SC", "RS", "BA", "GO", "DF"], index=0)
-            municipios = st.multiselect("Municipios", data_sources.get_cidades_disponiveis(), default=["MARINGA"])
+            col_geo_long, col_geo_short = st.columns([3, 1], gap="medium")
+            with col_geo_long:
+                municipios = st.multiselect("Municipios", data_sources.get_cidades_disponiveis(), default=["MARINGA"])
+            with col_geo_short:
+                uf = st.selectbox("UF", ["PR", "SP", "RJ", "MG", "SC", "RS", "BA", "GO", "DF"], index=0)
     with col_b:
         with st.container(border=True):
             st.caption("Setor & CNAE")
             setores = st.multiselect("Setores", data_sources.get_setores_disponiveis(), default=["Servicos Administrativos"])
-            cnaes_manual = st.text_area("CNAE manual (opcional)", height=70)
-            excluir_mei = st.toggle("Excluir MEI", value=True)
+            col_cnae_long, col_cnae_short = st.columns([3, 1], gap="medium")
+            with col_cnae_long:
+                cnaes_manual = st.text_area("CNAE manual (opcional)", height=70)
+            with col_cnae_short:
+                excluir_mei = st.toggle("Excluir MEI", value=True)
 
     with st.expander("Parametros avancados"):
         col_p1, col_p2, col_p3 = st.columns(3)
@@ -569,18 +597,36 @@ def _render_vault() -> None:
     col_k1, col_k2, col_k3 = st.columns(3)
     col_k1.metric("📊 Total Leads", total_leads)
     col_k2.metric("⚡ Taxa de Enriquecimento", _tech_rate(total_leads, total_enriched))
-    col_k3.metric("✅ Leads Qualificados", qualified_count)
+    hot_ratio = qualified_count / max(total_leads, 1)
+    hot_color = "#10B981" if hot_ratio >= 0.2 else "#F97316"
+    with col_k3:
+        st.markdown(
+            f"""
+            <style>
+            .kpi-hot .kpi-value {{
+                color: {hot_color};
+            }}
+            </style>
+            <div class="kpi-card kpi-hot">
+                <div class="kpi-label">🔥 Leads Hot</div>
+                <div class="kpi-value">{qualified_count}</div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
 
     _micro_label("FILTROS")
-    col_f1, col_f2, col_f3, col_f4 = st.columns(4)
-    with col_f1:
-        min_score = st.number_input("Score minimo", min_value=0, max_value=100, value=0)
-    with col_f2:
-        min_tech_score = st.number_input("Tech score minimo", min_value=0, max_value=30, value=0)
-    with col_f3:
-        contact_quality = st.selectbox("Contact quality", options=["", "ok", "suspicious", "accountant_like"])
-    with col_f4:
-        municipio = st.text_input("Municipio")
+    with st.container(border=True):
+        col_f1, col_f2 = st.columns(2, gap="medium")
+        with col_f1:
+            min_score = st.number_input("Score minimo", min_value=0, max_value=100, value=0)
+        with col_f2:
+            min_tech_score = st.number_input("Tech score minimo", min_value=0, max_value=30, value=0)
+        col_f3, col_f4 = st.columns([3, 1], gap="medium")
+        with col_f3:
+            municipio = st.text_input("Municipio")
+        with col_f4:
+            contact_quality = st.selectbox("Contact quality", options=["", "ok", "suspicious", "accountant_like"])
 
     vault_rows = storage.query_enrichment_vault(
         min_score=min_score if min_score > 0 else None,

@@ -24,3 +24,55 @@ Traceback (most recent call last):
   File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 316, in _poll_export_link
     raise RuntimeError("Timeout aguardando export bulk")
 RuntimeError: Timeout aguardando export bulk
+2026-01-13 22:56:07,589 INFO run=8c1c76bd-3398-4cfa-b4bc-900173952d20 stage=PROBE status=RUNNING
+2026-01-13 22:56:07,589 INFO run=8c1c76bd-3398-4cfa-b4bc-900173952d20 stage=PROBE status=RUNNING
+2026-01-13 22:56:08,047 INFO run=8c1c76bd-3398-4cfa-b4bc-900173952d20 stage=BULK_EXPORT_REQUEST status=RUNNING
+2026-01-13 22:56:08,047 INFO run=8c1c76bd-3398-4cfa-b4bc-900173952d20 stage=BULK_EXPORT_REQUEST status=RUNNING
+2026-01-13 22:56:08,706 INFO run=8c1c76bd-3398-4cfa-b4bc-900173952d20 stage=BULK_POLL status=RUNNING
+2026-01-13 22:56:08,706 INFO run=8c1c76bd-3398-4cfa-b4bc-900173952d20 stage=BULK_POLL status=RUNNING
+2026-01-13 23:00:53,299 ERROR run=8c1c76bd-3398-4cfa-b4bc-900173952d20 failed
+Traceback (most recent call last):
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 176, in _run_job
+    self._run_bulk(run_id, filters, total, cancel_event, resume)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 401, in _run_bulk
+    link = self._poll_export_link(run_id, export_uuid, cancel_event)
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 337, in _poll_export_link
+    raise RuntimeError("Timeout aguardando export bulk")
+RuntimeError: Timeout aguardando export bulk
+2026-01-13 23:00:53,299 ERROR run=8c1c76bd-3398-4cfa-b4bc-900173952d20 failed
+Traceback (most recent call last):
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 176, in _run_job
+    self._run_bulk(run_id, filters, total, cancel_event, resume)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 401, in _run_bulk
+    link = self._poll_export_link(run_id, export_uuid, cancel_event)
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 337, in _poll_export_link
+    raise RuntimeError("Timeout aguardando export bulk")
+RuntimeError: Timeout aguardando export bulk
+2026-01-13 23:04:15,949 INFO run=84860993-ddf9-473c-81ea-4e3d06822f0e stage=PROBE status=RUNNING
+2026-01-13 23:04:15,949 INFO run=84860993-ddf9-473c-81ea-4e3d06822f0e stage=PROBE status=RUNNING
+2026-01-13 23:04:16,383 INFO run=84860993-ddf9-473c-81ea-4e3d06822f0e stage=BULK_EXPORT_REQUEST status=RUNNING
+2026-01-13 23:04:16,383 INFO run=84860993-ddf9-473c-81ea-4e3d06822f0e stage=BULK_EXPORT_REQUEST status=RUNNING
+2026-01-13 23:04:17,081 INFO run=84860993-ddf9-473c-81ea-4e3d06822f0e stage=BULK_POLL status=RUNNING
+2026-01-13 23:04:17,081 INFO run=84860993-ddf9-473c-81ea-4e3d06822f0e stage=BULK_POLL status=RUNNING
+2026-01-13 23:08:13,817 ERROR run=84860993-ddf9-473c-81ea-4e3d06822f0e failed
+Traceback (most recent call last):
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 176, in _run_job
+    self._run_bulk(run_id, filters, total, cancel_event, resume)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 401, in _run_bulk
+    link = self._poll_export_link(run_id, export_uuid, cancel_event)
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 337, in _poll_export_link
+    raise RuntimeError("Timeout aguardando export bulk")
+RuntimeError: Timeout aguardando export bulk
+2026-01-13 23:08:13,817 ERROR run=84860993-ddf9-473c-81ea-4e3d06822f0e failed
+Traceback (most recent call last):
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 176, in _run_job
+    self._run_bulk(run_id, filters, total, cancel_event, resume)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 401, in _run_bulk
+    link = self._poll_export_link(run_id, export_uuid, cancel_event)
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 337, in _poll_export_link
+    raise RuntimeError("Timeout aguardando export bulk")
+RuntimeError: Timeout aguardando export bulk
