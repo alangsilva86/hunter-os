@@ -6,14 +6,18 @@ import json
 import os
 import random
 import re
+import socket
 import time
 from datetime import datetime, timedelta
+from difflib import SequenceMatcher
 from typing import Any, Dict, List, Optional, Tuple
 from urllib.parse import urljoin
 
 import aiohttp
+from bs4 import BeautifulSoup
+from fake_useragent import UserAgent
 
-from modules import storage
+from modules import storage, providers
 from modules.providers import ProviderResponseError, SearchProvider
 from modules.tech_detection import OptionalRenderedDetector, TechSniperDetector
 
@@ -420,3 +424,299 @@ class AsyncEnricher:
             },
         )
         return results, stats
+
+
+_UA = UserAgent()
+_FALLBACK_UAS = [
+    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+    "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Safari/605.1.15",
+    "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+]
+
+
+def get_stealth_headers() -> Dict[str, str]:
+    try:
+        ua = _UA.random
+    except Exception:
+        ua = random.choice(_FALLBACK_UAS)
+    return {
+        "User-Agent": ua,
+        "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+        "Accept-Language": "pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7",
+        "Cache-Control": "no-cache",
+        "Pragma": "no-cache",
+    }
+
+
+GENERIC_EMAIL_DOMAINS = {
+    "gmail.com",
+    "hotmail.com",
+    "outlook.com",
+    "yahoo.com",
+    "bol.com.br",
+    "uol.com.br",
+    "icloud.com",
+    "live.com",
+}
+
+
+class AdaptiveLimiter:
+    def __init__(self, concurrency: int):
+        self._limit = max(1, int(concurrency))
+        self._semaphore = asyncio.Semaphore(self._limit)
+        self._lock = asyncio.Lock()
+        self._pause_until = 0.0
+
+    async def acquire(self) -> None:
+        while True:
+            now = time.monotonic()
+            if now < self._pause_until:
+                await asyncio.sleep(self._pause_until - now)
+                continue
+            await self._semaphore.acquire()
+            return
+
+    def release(self) -> None:
+        self._semaphore.release()
+
+    async def reduce(self) -> None:
+        async with self._lock:
+            self._pause_until = max(self._pause_until, time.monotonic() + 60)
+            if self._limit > 1:
+                self._limit -= 1
+                asyncio.create_task(self._semaphore.acquire())
+
+
+def _email_domain(email: Optional[str]) -> str:
+    if not email or "@" not in email:
+        return ""
+    return email.split("@")[-1].strip().lower()
+
+
+def _is_generic_email(email: Optional[str]) -> bool:
+    return _email_domain(email) in GENERIC_EMAIL_DOMAINS
+
+
+async def _dns_valid(domain: str) -> bool:
+    if not domain:
+        return False
+    try:
+        await asyncio.get_running_loop().getaddrinfo(domain, None)
+        return True
+    except socket.gaierror:
+        return False
+    except Exception:
+        return False
+
+
+_COMPANY_STOPWORDS = {
+    "ltda",
+    "me",
+    "mei",
+    "eireli",
+    "sa",
+    "s/a",
+    "da",
+    "de",
+    "do",
+    "dos",
+    "das",
+    "e",
+    "empresa",
+}
+
+
+def _normalize_company_text(text: str) -> List[str]:
+    text = re.sub(r"[^a-z0-9 ]+", " ", (text or "").lower())
+    return [tok for tok in text.split() if tok and tok not in _COMPANY_STOPWORDS]
+
+
+def _title_similarity(title: str, company: str) -> float:
+    if not title or not company:
+        return 0.0
+    title_tokens = _normalize_company_text(title)
+    company_tokens = _normalize_company_text(company)
+    if not title_tokens or not company_tokens:
+        return 0.0
+    token_overlap = len(set(title_tokens) & set(company_tokens)) / max(1, len(set(company_tokens)))
+    seq_ratio = SequenceMatcher(None, " ".join(title_tokens), " ".join(company_tokens)).ratio()
+    return max(token_overlap, seq_ratio)
+
+
+async def _direct_fetch(
+    session: aiohttp.ClientSession,
+    domain: str,
+    detector: TechSniperDetector,
+) -> Optional[Dict[str, Any]]:
+    candidates = [f"https://{domain}", f"http://{domain}"]
+    if not domain.startswith("www."):
+        candidates.append(f"https://www.{domain}")
+    for url in candidates:
+        start = time.time()
+        try:
+            async with session.get(url, headers=get_stealth_headers()) as resp:
+                if resp.status != 200:
+                    continue
+                html = await resp.text(errors="ignore")
+                soup = BeautifulSoup(html, "html.parser")
+                title = (soup.title.string or "").strip() if soup.title else ""
+                meta_tag = soup.find("meta", attrs={"name": "description"}) or soup.find(
+                    "meta", attrs={"property": "og:description"}
+                )
+                meta_desc = meta_tag.get("content", "").strip() if meta_tag else ""
+                headers = {k.lower(): v for k, v in resp.headers.items()}
+                cookies = [cookie.key for cookie in resp.cookies.values()]
+                analysis = detector.analyze_content(html, headers, cookies)
+                return {
+                    "title": title,
+                    "meta_description": meta_desc,
+                    "analysis": analysis,
+                    "fetch_status": resp.status,
+                    "fetch_ms": int((time.time() - start) * 1000),
+                    "fetched_url": str(resp.url),
+                    "has_form": _has_form(html),
+                    "has_whatsapp_link": analysis.get("has_whatsapp_link") or _has_whatsapp_link(html),
+                }
+        except (aiohttp.ClientError, asyncio.TimeoutError):
+            continue
+    return None
+
+
+async def enrich_leads_hybrid(
+    leads: List[Dict[str, Any]],
+    provider: Optional[SearchProvider] = None,
+    concurrency: int = 8,
+    timeout: int = 5,
+) -> List[Dict[str, Any]]:
+    if provider is None:
+        provider = providers.select_provider("serper")
+    limiter = AdaptiveLimiter(concurrency)
+    detector = TechSniperDetector(timeout=timeout)
+    timeout_cfg = aiohttp.ClientTimeout(sock_connect=3, sock_read=5, total=max(8, timeout))
+
+    async def _enrich_one(session: aiohttp.ClientSession, lead: Dict[str, Any]) -> Dict[str, Any]:
+        result = {
+            "cnpj": lead.get("cnpj"),
+            "run_id": lead.get("run_id"),
+            "site": None,
+            "instagram": None,
+            "linkedin_company": None,
+            "linkedin_people": [],
+            "google_maps_url": lead.get("flags", {}).get("google_maps_url"),
+            "has_contact_page": False,
+            "has_form": False,
+            "tech_stack": {},
+            "tech_score": 0,
+            "tech_confidence": 0,
+            "has_marketing": False,
+            "has_analytics": False,
+            "has_ecommerce": False,
+            "has_chat": False,
+            "signals": {},
+            "fetched_url": None,
+            "fetch_status": None,
+            "fetch_ms": 0,
+            "rendered_used": False,
+            "contact_quality": lead.get("contact_quality"),
+            "notes": "",
+        }
+        try:
+            emails = lead.get("emails_norm") or []
+            email = emails[0] if emails else lead.get("email")
+            domain = _email_domain(email)
+            generic = _is_generic_email(email)
+            dns_ok = await _dns_valid(domain) if domain else False
+
+            title = ""
+            meta_desc = ""
+            direct_analysis: Dict[str, Any] = {}
+            low_confidence_site = False
+
+            if domain and dns_ok and not generic:
+                direct = await _direct_fetch(session, domain, detector)
+                if direct:
+                    title = direct.get("title") or ""
+                    meta_desc = direct.get("meta_description") or ""
+                    direct_analysis = direct.get("analysis") or {}
+                    result["fetched_url"] = direct.get("fetched_url")
+                    result["fetch_status"] = direct.get("fetch_status")
+                    result["fetch_ms"] = direct.get("fetch_ms")
+                    result["has_form"] = bool(direct.get("has_form"))
+                    result["site"] = result["fetched_url"]
+                    similarity = _title_similarity(
+                        title,
+                        lead.get("razao_social") or lead.get("nome_fantasia") or "",
+                    )
+                    low_confidence_site = similarity < 0.3
+                    if low_confidence_site:
+                        result["notes"] = "low_confidence_site"
+
+            needs_fallback = generic or low_confidence_site or not result.get("site")
+            if needs_fallback:
+                query = f"{lead.get('razao_social', '')} {lead.get('municipio', '')} {lead.get('uf', '')}".strip()
+                try:
+                    await limiter.acquire()
+                    search_data = await provider.search(session, query)
+                except ProviderResponseError as exc:
+                    if exc.status_code == 429:
+                        await limiter.reduce()
+                    result["notes"] = _sanitize_error_message(str(exc))
+                    search_data = {}
+                except Exception as exc:
+                    result["notes"] = _sanitize_error_message(str(exc))
+                    search_data = {}
+                finally:
+                    limiter.release()
+
+                if search_data:
+                    result["site"] = search_data.get("site")
+                    result["instagram"] = search_data.get("instagram")
+                    result["linkedin_company"] = search_data.get("linkedin_company")
+                    result["linkedin_people"] = search_data.get("linkedin_people", [])
+
+            if direct_analysis:
+                result["tech_score"] = direct_analysis.get("tech_score", 0)
+                result["tech_confidence"] = direct_analysis.get("confidence", 0)
+                result["has_marketing"] = direct_analysis.get("has_marketing", False)
+                result["has_analytics"] = direct_analysis.get("has_analytics", False)
+                result["has_ecommerce"] = direct_analysis.get("has_ecommerce", False)
+                result["has_chat"] = direct_analysis.get("has_chat", False)
+                result["signals"] = direct_analysis.get("signals", {})
+                result["tech_stack"] = {
+                    "detected_stack": direct_analysis.get("detected_stack", []),
+                    "has_whatsapp_link": direct_analysis.get("has_whatsapp_link", False),
+                }
+            elif result.get("site"):
+                detection = await detector.detect(result["site"], session, return_html=False)
+                result["tech_score"] = detection.get("tech_score", 0)
+                result["tech_confidence"] = detection.get("confidence", 0)
+                result["has_marketing"] = detection.get("has_marketing", False)
+                result["has_analytics"] = detection.get("has_analytics", False)
+                result["has_ecommerce"] = detection.get("has_ecommerce", False)
+                result["has_chat"] = detection.get("has_chat", False)
+                result["signals"] = detection.get("signals", {})
+                result["fetched_url"] = detection.get("fetched_url")
+                result["fetch_status"] = detection.get("fetch_status")
+                result["fetch_ms"] = detection.get("fetch_ms") or 0
+                result["tech_stack"] = {
+                    "detected_stack": detection.get("detected_stack", []),
+                    "has_whatsapp_link": detection.get("has_whatsapp_link", False),
+                }
+
+            if title or meta_desc or low_confidence_site:
+                result["signals"] = result.get("signals") or {}
+                result["signals"].update(
+                    {
+                        "site_title": title,
+                        "site_meta_description": meta_desc,
+                        "low_confidence_site": low_confidence_site,
+                    }
+                )
+        except Exception as exc:
+            result["notes"] = _sanitize_error_message(str(exc))
+
+        return result
+
+    async with aiohttp.ClientSession(timeout=timeout_cfg) as session:
+        tasks = [_enrich_one(session, lead) for lead in leads]
+        return await asyncio.gather(*tasks)

@@ -1,0 +1,26 @@
+2026-01-13 21:44:49,445 INFO run=5c96f7ee-902f-40c7-88ca-f3654b4ba899 stage=PROBE status=RUNNING
+2026-01-13 21:44:49,445 INFO run=5c96f7ee-902f-40c7-88ca-f3654b4ba899 stage=PROBE status=RUNNING
+2026-01-13 21:44:49,890 INFO run=5c96f7ee-902f-40c7-88ca-f3654b4ba899 stage=BULK_EXPORT_REQUEST status=RUNNING
+2026-01-13 21:44:49,890 INFO run=5c96f7ee-902f-40c7-88ca-f3654b4ba899 stage=BULK_EXPORT_REQUEST status=RUNNING
+2026-01-13 21:44:50,588 INFO run=5c96f7ee-902f-40c7-88ca-f3654b4ba899 stage=BULK_POLL status=RUNNING
+2026-01-13 21:44:50,588 INFO run=5c96f7ee-902f-40c7-88ca-f3654b4ba899 stage=BULK_POLL status=RUNNING
+2026-01-13 21:49:18,422 ERROR run=5c96f7ee-902f-40c7-88ca-f3654b4ba899 failed
+Traceback (most recent call last):
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 176, in _run_job
+    self._run_bulk(run_id, filters, total, cancel_event, resume)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 380, in _run_bulk
+    link = self._poll_export_link(run_id, export_uuid, cancel_event)
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 316, in _poll_export_link
+    raise RuntimeError("Timeout aguardando export bulk")
+RuntimeError: Timeout aguardando export bulk
+2026-01-13 21:49:18,422 ERROR run=5c96f7ee-902f-40c7-88ca-f3654b4ba899 failed
+Traceback (most recent call last):
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 176, in _run_job
+    self._run_bulk(run_id, filters, total, cancel_event, resume)
+    ~~~~~~~~~~~~~~^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 380, in _run_bulk
+    link = self._poll_export_link(run_id, export_uuid, cancel_event)
+  File "/Users/alandasilva/Documents/GitHub/hunter-os/etl_pipeline.py", line 316, in _poll_export_link
+    raise RuntimeError("Timeout aguardando export bulk")
+RuntimeError: Timeout aguardando export bulk

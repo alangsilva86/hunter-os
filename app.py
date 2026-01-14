@@ -4,6 +4,7 @@ import json
 import os
 import hashlib
 import re
+import logging
 from pathlib import Path
 from datetime import datetime, timedelta, timezone
 from typing import Any, Dict, List, Optional, Tuple
@@ -19,7 +20,8 @@ try:
 except Exception:
     pass
 
-from modules import data_sources, jobs, storage
+from etl_pipeline import HunterOrchestrator
+from modules import data_sources, exports as webhook_exports, jobs, storage
 
 
 st.set_page_config(
@@ -34,6 +36,39 @@ storage.init_db()
 
 def _env(key: str, default: str = "") -> str:
     return os.getenv(key, default)
+
+
+class _SessionLogHandler(logging.Handler):
+    def emit(self, record: logging.LogRecord) -> None:
+        try:
+            message = self.format(record)
+        except Exception:
+            message = record.getMessage()
+        logs = st.session_state.setdefault("live_logs", [])
+        logs.append(message)
+        if len(logs) > 200:
+            del logs[:-200]
+
+
+def _configure_logging() -> logging.Logger:
+    logger = logging.getLogger("hunter")
+    logger.setLevel(logging.INFO)
+    if not any(isinstance(handler, logging.FileHandler) for handler in logger.handlers):
+        log_dir = Path("logs")
+        log_dir.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_dir / "hunter.log")
+        file_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(file_handler)
+    if not st.session_state.get("session_log_handler"):
+        session_handler = _SessionLogHandler()
+        session_handler.setFormatter(logging.Formatter("%(asctime)s %(levelname)s %(message)s"))
+        logger.addHandler(session_handler)
+        st.session_state["session_log_handler"] = True
+    return logger
+
+
+logger = _configure_logging()
+orchestrator = HunterOrchestrator()
 
 
 def _set_env(key: str, value: str) -> None:
@@ -313,10 +348,13 @@ st.title("Hunter OS - B2B Prospecting")
 
 if "current_run_id" not in st.session_state:
     st.session_state.current_run_id = None
+if "current_hunter_run_id" not in st.session_state:
+    st.session_state.current_hunter_run_id = None
 
 
-buscar_tab, monitor_tab, resultados_tab, exports_tab, recovery_tab, vault_tab, runs_tab, diagnostics_tab, config_tab = st.tabs(
+dashboard_tab, buscar_tab, monitor_tab, resultados_tab, exports_tab, recovery_tab, vault_tab, runs_tab, diagnostics_tab, config_tab = st.tabs(
     [
+        "Dashboard (v3)",
         "Buscar",
         "Monitor (Live)",
         "Resultados",
@@ -412,6 +450,72 @@ with config_tab:
     st.caption(f"max_rps={_env('SERPER_MAX_RPS', '5')} | concurrency efetiva={effective_concurrency}")
     st.warning("Acima do limite, ocorrera pausa automatica (HTTP 429).")
 
+with dashboard_tab:
+    st.subheader("Dashboard de Comando")
+
+    hunter_runs = storage.list_hunter_runs(limit=50)
+    hunter_ids = [r.get("id") for r in hunter_runs] if hunter_runs else []
+    default_hunter_id = st.session_state.get("current_hunter_run_id") or (hunter_ids[0] if hunter_ids else "")
+
+    def _hunter_label(run_id: str) -> str:
+        if not run_id:
+            return "Selecione um job"
+        run = storage.get_hunter_run(run_id) or {}
+        status = run.get("status", "unknown")
+        return f"{run_id[:8]}... ({status})"
+
+    selected_hunter_id = st.selectbox(
+        "Job v3",
+        options=[""] + hunter_ids,
+        index=(hunter_ids.index(default_hunter_id) + 1) if default_hunter_id in hunter_ids else 0,
+        format_func=_hunter_label,
+        key="hunter_run_id",
+    )
+
+    if selected_hunter_id:
+        st.session_state.current_hunter_run_id = selected_hunter_id
+
+        @st.fragment(run_every="2s")
+        def _render_v3_dashboard(run_id: str) -> None:
+            run = storage.get_hunter_run(run_id)
+            if not run:
+                st.info("Job nao encontrado.")
+                return
+            col_a, col_b, col_c, col_d = st.columns(4)
+            col_a.metric("Status", run.get("status"))
+            col_b.metric("Etapa atual", run.get("current_stage"))
+            col_c.metric("Estrategia", run.get("strategy") or "-")
+            running = orchestrator.is_running(run_id)
+            col_d.metric("Worker", "rodando" if running else "parado")
+
+            total_leads = int(run.get("total_leads") or 0)
+            processed = int(run.get("processed_count") or 0)
+            pct, label = _progress_label(processed, total_leads)
+            st.progress(pct)
+            st.caption(f"Progresso: {label}")
+
+            if st.button("Panico/Parar", key=f"panic_{run_id}"):
+                orchestrator.cancel_job(run_id)
+                st.warning("Solicitacao de pausa enviada.")
+
+            with st.expander("Logs vivos (ultimas 10 linhas)"):
+                logs = storage.fetch_logs(limit=10, run_id=run_id)
+                if logs:
+                    for log in logs[::-1]:
+                        message = _log_message(log.get("detail_json", "")) or log.get("detail_json", "")
+                        st.caption(f"{log.get('created_at')} | {log.get('level')} | {log.get('event')} | {message}")
+                else:
+                    ui_logs = st.session_state.get("live_logs", [])[-10:]
+                    if ui_logs:
+                        for line in ui_logs:
+                            st.caption(line)
+                    else:
+                        st.caption("Sem logs recentes.")
+
+        _render_v3_dashboard(selected_hunter_id)
+    else:
+        st.info("Nenhum job v3 selecionado.")
+
 with buscar_tab:
     st.subheader("Buscar")
 
@@ -481,32 +585,56 @@ with buscar_tab:
         col_r3.metric("Tempo estimado", _format_duration(est_seconds))
         st.caption("Cache reaproveitado so pode ser estimado apos a coleta.")
 
-    if st.button("Iniciar run"):
-        params = {
-            "uf": uf,
-            "municipios": municipios,
-            "cnaes": cnaes,
-            "excluir_mei": excluir_mei,
-            "com_telefone": com_telefone,
-            "com_email": com_email,
-            "limite": int(limite),
-            "mode": mode,
-            "cache_ttl_hours": int(cache_ttl_hours),
-            "telefone_repeat_threshold": int(telefone_repeat_threshold),
-            "enrich_top_pct": int(enrich_top_pct),
-            "enable_enrichment": enable_enrichment,
-            "export_all": export_all,
-            "provider": provider,
-            "page_size": int(page_size),
-            "concurrency": int(_env("CONCURRENCY", "10")),
-            "timeout": int(_env("TIMEOUT", "5")),
-            "run_type": "export" if export_all else "standard",
-            "safe_enrich_limit": int(safe_enrich_limit) if safe_enrich_limit else None,
-            "cache_only": bool(cache_only),
-        }
-        run_id = jobs.start_run(params)
-        st.session_state.current_run_id = run_id
-        st.success(f"Run iniciado: {run_id}")
+    col_run_a, col_run_b = st.columns(2)
+    with col_run_a:
+        if st.button("Iniciar run (v2)"):
+            params = {
+                "uf": uf,
+                "municipios": municipios,
+                "cnaes": cnaes,
+                "excluir_mei": excluir_mei,
+                "com_telefone": com_telefone,
+                "com_email": com_email,
+                "limite": int(limite),
+                "mode": mode,
+                "cache_ttl_hours": int(cache_ttl_hours),
+                "telefone_repeat_threshold": int(telefone_repeat_threshold),
+                "enrich_top_pct": int(enrich_top_pct),
+                "enable_enrichment": enable_enrichment,
+                "export_all": export_all,
+                "provider": provider,
+                "page_size": int(page_size),
+                "concurrency": int(_env("CONCURRENCY", "10")),
+                "timeout": int(_env("TIMEOUT", "5")),
+                "run_type": "export" if export_all else "standard",
+                "safe_enrich_limit": int(safe_enrich_limit) if safe_enrich_limit else None,
+                "cache_only": bool(cache_only),
+            }
+            run_id = jobs.start_run(params)
+            st.session_state.current_run_id = run_id
+            st.success(f"Run iniciado: {run_id}")
+    with col_run_b:
+        if st.button("Iniciar job v3 (auto)"):
+            filters = {
+                "uf": uf,
+                "municipios": municipios,
+                "cnaes": cnaes,
+                "excluir_mei": excluir_mei,
+                "com_telefone": com_telefone,
+                "com_email": com_email,
+                "limite": int(limite),
+                "page_size": int(page_size),
+                "cache_ttl_hours": int(cache_ttl_hours),
+                "telefone_repeat_threshold": int(telefone_repeat_threshold),
+                "enrich_top_pct": int(enrich_top_pct),
+                "enable_enrichment": enable_enrichment,
+                "provider": provider,
+                "concurrency": int(_env("CONCURRENCY", "10")),
+                "timeout": int(_env("TIMEOUT", "5")),
+            }
+            run_id = orchestrator.start_job(filters)
+            st.session_state.current_hunter_run_id = run_id
+            st.success(f"Job v3 iniciado: {run_id}")
 
     if st.session_state.current_run_id:
         current_run_id = st.session_state.current_run_id
@@ -1498,29 +1626,53 @@ with vault_tab:
     if vault_rows:
         df_vault = pd.DataFrame(vault_rows)
         df_vault["stack_resumo"] = df_vault["tech_stack_json"].apply(_stack_summary)
-        st.dataframe(
-            df_vault[[
-                "cnpj",
-                "razao_social",
-                "municipio",
-                "uf",
-                "site",
-                "instagram",
-                "linkedin_company",
-                "tech_score",
-                "tech_confidence",
-                "stack_resumo",
-                "has_marketing",
-                "has_analytics",
-                "has_ecommerce",
-                "has_chat",
-                "rendered_used",
-                "score_v2",
-                "score_label",
-                "contact_quality",
-            ]],
-            width="stretch",
+        display_cols = [
+            "cnpj",
+            "razao_social",
+            "municipio",
+            "uf",
+            "site",
+            "instagram",
+            "linkedin_company",
+            "tech_score",
+            "tech_confidence",
+            "stack_resumo",
+            "has_marketing",
+            "has_analytics",
+            "has_ecommerce",
+            "has_chat",
+            "rendered_used",
+            "score_v2",
+            "score_label",
+            "contact_quality",
+        ]
+        df_display = df_vault[display_cols].copy()
+        df_display.insert(0, "selecionar", False)
+        edited = st.data_editor(
+            df_display,
+            hide_index=True,
+            use_container_width=True,
+            key="vault_editor",
         )
+
+        selected_idx = edited.index[edited["selecionar"]].tolist()
+        selected_payload = df_vault.loc[selected_idx].to_dict(orient="records") if selected_idx else []
+
+        st.markdown("#### Disparo de webhook")
+        webhook_url = st.text_input("Webhook URL", key="vault_webhook_url")
+        if st.button("Disparar Webhook"):
+            if not selected_payload:
+                st.warning("Selecione ao menos um lead.")
+            elif not webhook_url:
+                st.warning("Informe a URL do webhook.")
+            else:
+                try:
+                    result = webhook_exports.send_batch_to_webhook(selected_payload, webhook_url)
+                    st.success(
+                        f"Webhook enviado. Sucesso: {result.get('sent', 0)} | Falhas: {result.get('failed', 0)}."
+                    )
+                except Exception as exc:
+                    st.error(f"Falha ao enviar webhook: {exc}")
         csv_data = df_vault.to_csv(index=False)
         st.download_button(
             "Exportar CSV do vault",

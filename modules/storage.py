@@ -333,6 +333,76 @@ def init_db() -> None:
 
         cur.execute(
             """
+            CREATE TABLE IF NOT EXISTS hunter_runs (
+                id TEXT PRIMARY KEY,
+                filters_json TEXT,
+                strategy TEXT,
+                current_stage TEXT,
+                status TEXT,
+                total_leads INTEGER,
+                processed_count INTEGER,
+                created_at TIMESTAMP,
+                updated_at TIMESTAMP
+            )
+            """
+        )
+        _ensure_column(conn, "hunter_runs", "filters_json", "TEXT")
+        _ensure_column(conn, "hunter_runs", "strategy", "TEXT")
+        _ensure_column(conn, "hunter_runs", "current_stage", "TEXT")
+        _ensure_column(conn, "hunter_runs", "status", "TEXT")
+        _ensure_column(conn, "hunter_runs", "total_leads", "INTEGER")
+        _ensure_column(conn, "hunter_runs", "processed_count", "INTEGER")
+        _ensure_column(conn, "hunter_runs", "created_at", "TIMESTAMP")
+        _ensure_column(conn, "hunter_runs", "updated_at", "TIMESTAMP")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS exports_jobs (
+                run_id TEXT PRIMARY KEY,
+                export_uuid_cd TEXT,
+                file_url TEXT,
+                expires_at TIMESTAMP,
+                file_path_local TEXT
+            )
+            """
+        )
+        _ensure_column(conn, "exports_jobs", "export_uuid_cd", "TEXT")
+        _ensure_column(conn, "exports_jobs", "file_url", "TEXT")
+        _ensure_column(conn, "exports_jobs", "expires_at", "TIMESTAMP")
+        _ensure_column(conn, "exports_jobs", "file_path_local", "TEXT")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS config (
+                key TEXT PRIMARY KEY,
+                value TEXT,
+                updated_at TIMESTAMP
+            )
+            """
+        )
+        _ensure_column(conn, "config", "value", "TEXT")
+        _ensure_column(conn, "config", "updated_at", "TIMESTAMP")
+
+        cur.execute(
+            """
+            CREATE TABLE IF NOT EXISTS webhook_deliveries (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                run_id TEXT,
+                lead_cnpj TEXT,
+                status TEXT,
+                response_code INTEGER,
+                timestamp TIMESTAMP
+            )
+            """
+        )
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_webhook_deliveries_run ON webhook_deliveries(run_id)")
+        _ensure_column(conn, "webhook_deliveries", "lead_cnpj", "TEXT")
+        _ensure_column(conn, "webhook_deliveries", "status", "TEXT")
+        _ensure_column(conn, "webhook_deliveries", "response_code", "INTEGER")
+        _ensure_column(conn, "webhook_deliveries", "timestamp", "TIMESTAMP")
+
+        cur.execute(
+            """
             CREATE TABLE IF NOT EXISTS errors (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 run_id TEXT,
@@ -466,6 +536,74 @@ def insert_leads_raw(
             """,
             rows,
         )
+
+
+def upsert_leads_raw(
+    leads: List[Dict[str, Any]],
+    source: str,
+    run_id: Optional[str] = None,
+    export_uuid: Optional[str] = None,
+) -> None:
+    if not leads:
+        return
+    cnpjs = [lead.get("cnpj") for lead in leads if lead.get("cnpj")]
+    if not cnpjs:
+        return
+    placeholders = ",".join(["?"] * len(cnpjs))
+    with get_conn() as conn:
+        if run_id:
+            rows = conn.execute(
+                f"SELECT cnpj FROM leads_raw WHERE run_id = ? AND cnpj IN ({placeholders})",
+                [run_id, *cnpjs],
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                f"SELECT cnpj FROM leads_raw WHERE cnpj IN ({placeholders})",
+                cnpjs,
+            ).fetchall()
+    existing = {row["cnpj"] for row in rows}
+    to_insert: List[Tuple[Any, ...]] = []
+    to_update: List[Tuple[Any, ...]] = []
+    now = _utcnow()
+    for lead in leads:
+        cnpj = lead.get("cnpj")
+        payload = json.dumps(lead, ensure_ascii=False)
+        if cnpj in existing:
+            if run_id:
+                to_update.append((payload, now, source, export_uuid, run_id, cnpj))
+            else:
+                to_update.append((payload, now, source, export_uuid, cnpj))
+        else:
+            to_insert.append((cnpj, payload, now, source, run_id, export_uuid))
+    with get_conn() as conn:
+        if to_insert:
+            conn.executemany(
+                """
+                INSERT INTO leads_raw
+                (cnpj, payload_json, fetched_at, source, run_id, export_uuid)
+                VALUES (?, ?, ?, ?, ?, ?)
+                """,
+                to_insert,
+            )
+        if to_update:
+            if run_id:
+                conn.executemany(
+                    """
+                    UPDATE leads_raw
+                    SET payload_json = ?, fetched_at = ?, source = ?, export_uuid = ?
+                    WHERE run_id = ? AND cnpj = ?
+                    """,
+                    to_update,
+                )
+            else:
+                conn.executemany(
+                    """
+                    UPDATE leads_raw
+                    SET payload_json = ?, fetched_at = ?, source = ?, export_uuid = ?
+                    WHERE cnpj = ?
+                    """,
+                    to_update,
+                )
 
 
 def fetch_leads_raw_by_source(source: str) -> List[Dict[str, Any]]:
@@ -691,6 +829,177 @@ def get_run(run_id: str) -> Optional[Dict[str, Any]]:
             (run_id,),
         ).fetchone()
     return dict(row) if row else None
+
+
+def create_hunter_run(
+    filters: Dict[str, Any],
+    strategy: Optional[str] = None,
+    status: str = "RUNNING",
+    current_stage: str = "PROBE",
+) -> str:
+    run_id = str(uuid4())
+    now = _utcnow()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO hunter_runs
+            (id, filters_json, strategy, current_stage, status, total_leads, processed_count, created_at, updated_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                run_id,
+                json.dumps(filters, ensure_ascii=False),
+                strategy,
+                current_stage,
+                status,
+                0,
+                0,
+                now,
+                now,
+            ),
+        )
+    return run_id
+
+
+def update_hunter_run(run_id: str, **fields: Any) -> None:
+    if not fields:
+        return
+    if "updated_at" not in fields:
+        fields["updated_at"] = _utcnow()
+    keys = []
+    values = []
+    for key, value in fields.items():
+        keys.append(f"{key}=?")
+        values.append(value)
+    values.append(run_id)
+    with get_conn() as conn:
+        conn.execute(
+            f"UPDATE hunter_runs SET {', '.join(keys)} WHERE id = ?",
+            values,
+        )
+
+
+def get_hunter_run(run_id: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM hunter_runs WHERE id = ?",
+            (run_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_hunter_runs(limit: int = 50) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM hunter_runs ORDER BY created_at DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def upsert_export_job(
+    run_id: str,
+    export_uuid_cd: Optional[str] = None,
+    file_url: Optional[str] = None,
+    expires_at: Optional[str] = None,
+    file_path_local: Optional[str] = None,
+) -> None:
+    with get_conn() as conn:
+        cur = conn.execute(
+            """
+            UPDATE exports_jobs
+            SET export_uuid_cd = ?, file_url = ?, expires_at = ?, file_path_local = ?
+            WHERE run_id = ?
+            """,
+            (export_uuid_cd, file_url, expires_at, file_path_local, run_id),
+        )
+        if cur.rowcount == 0:
+            conn.execute(
+                """
+                INSERT INTO exports_jobs
+                (run_id, export_uuid_cd, file_url, expires_at, file_path_local)
+                VALUES (?, ?, ?, ?, ?)
+                """,
+                (run_id, export_uuid_cd, file_url, expires_at, file_path_local),
+            )
+
+
+def get_export_job(run_id: str) -> Optional[Dict[str, Any]]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT * FROM exports_jobs WHERE run_id = ?",
+            (run_id,),
+        ).fetchone()
+    return dict(row) if row else None
+
+
+def list_export_jobs(limit: int = 50) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        rows = conn.execute(
+            "SELECT * FROM exports_jobs ORDER BY rowid DESC LIMIT ?",
+            (limit,),
+        ).fetchall()
+    return [dict(row) for row in rows]
+
+
+def config_get(key: str) -> Optional[str]:
+    with get_conn() as conn:
+        row = conn.execute(
+            "SELECT value FROM config WHERE key = ?",
+            (key,),
+        ).fetchone()
+    return row["value"] if row else None
+
+
+def config_set(key: str, value: str) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO config (key, value, updated_at)
+            VALUES (?, ?, ?)
+            ON CONFLICT(key) DO UPDATE SET
+                value=excluded.value,
+                updated_at=excluded.updated_at
+            """,
+            (key, value, _utcnow()),
+        )
+
+
+def record_webhook_delivery(
+    run_id: Optional[str],
+    lead_cnpj: Optional[str],
+    status: str,
+    response_code: Optional[int],
+) -> None:
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO webhook_deliveries
+            (run_id, lead_cnpj, status, response_code, timestamp)
+            VALUES (?, ?, ?, ?, ?)
+            """,
+            (run_id, lead_cnpj, status, response_code, _utcnow()),
+        )
+
+
+def fetch_webhook_deliveries(run_id: Optional[str] = None, limit: int = 100) -> List[Dict[str, Any]]:
+    with get_conn() as conn:
+        if run_id:
+            rows = conn.execute(
+                """
+                SELECT * FROM webhook_deliveries
+                WHERE run_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (run_id, limit),
+            ).fetchall()
+        else:
+            rows = conn.execute(
+                "SELECT * FROM webhook_deliveries ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+    return [dict(row) for row in rows]
 
 
 def fetch_leads_clean(limit: int = 100, offset: int = 0) -> List[Dict[str, Any]]:
