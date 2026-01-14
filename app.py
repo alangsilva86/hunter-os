@@ -3,6 +3,7 @@
 import html
 import json
 import logging
+import math
 import os
 import threading
 from datetime import datetime, timezone
@@ -129,6 +130,92 @@ def _stack_tags(tech_stack_json: Optional[str]) -> str:
         return ""
     tags = [f"[{item}]" for item in stack[:6]]
     return " ".join(tags)
+
+
+def _stack_summary(tech_stack_json: Optional[str]) -> str:
+    parsed = _parse_json(tech_stack_json)
+    stack: List[str] = []
+    if isinstance(parsed, dict):
+        stack = parsed.get("detected_stack") or parsed.get("stack") or []
+    elif isinstance(parsed, list):
+        stack = parsed
+    if not stack:
+        return ""
+    return ", ".join(stack[:10])
+
+
+def _build_export_df(rows: List[Dict[str, Any]]) -> pd.DataFrame:
+    df = pd.DataFrame(rows)
+    if df.empty:
+        return df
+    df["stack_resumo"] = df["tech_stack_json"].apply(_stack_summary) if "tech_stack_json" in df.columns else ""
+    export_columns = [
+        "cnpj",
+        "run_id",
+        "site",
+        "instagram",
+        "linkedin_company",
+        "linkedin_people_json",
+        "google_maps_url",
+        "has_contact_page",
+        "has_form",
+        "tech_stack_json",
+        "tech_score",
+        "contact_quality",
+        "notes",
+        "enriched_at",
+        "tech_confidence",
+        "has_marketing",
+        "has_analytics",
+        "has_ecommerce",
+        "has_chat",
+        "signals_json",
+        "fetched_url",
+        "fetch_status",
+        "fetch_ms",
+        "rendered_used",
+        "razao_social",
+        "nome_fantasia",
+        "cnae",
+        "municipio",
+        "uf",
+        "score_v2",
+        "score_label",
+        "stack_resumo",
+    ]
+    for column in export_columns:
+        if column not in df.columns:
+            df[column] = ""
+    return df[export_columns]
+
+
+def _fetch_all_vault_rows(
+    min_score: Optional[int],
+    min_tech_score: Optional[int],
+    contact_quality: Optional[str],
+    municipio: Optional[str],
+    has_marketing: Optional[bool] = None,
+    batch_size: int = 500,
+) -> List[Dict[str, Any]]:
+    all_rows: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        batch = storage.query_enrichment_vault(
+            min_score=min_score,
+            min_tech_score=min_tech_score,
+            contact_quality=contact_quality,
+            municipio=municipio,
+            has_marketing=has_marketing,
+            limit=batch_size,
+            offset=offset,
+        )
+        if not batch:
+            break
+        all_rows.extend(batch)
+        if len(batch) < batch_size:
+            break
+        offset += batch_size
+    return all_rows
 
 
 def _status_label(score: Optional[int]) -> str:
@@ -594,12 +681,13 @@ def _render_vault() -> None:
     total_enriched = storage.count_enrichments()
     with storage.get_conn() as conn:
         qualified_count = conn.execute("SELECT COUNT(*) AS cnt FROM leads_clean WHERE score_v2 >= 70").fetchone()["cnt"]
-    col_k1, col_k2, col_k3 = st.columns(3)
+    col_k1, col_k2, col_k3, col_k4 = st.columns(4)
     col_k1.metric("📊 Total Leads", total_leads)
-    col_k2.metric("⚡ Taxa de Enriquecimento", _tech_rate(total_leads, total_enriched))
+    col_k2.metric("🧪 Enriquecidos", total_enriched)
+    col_k3.metric("⚡ Taxa de Enriquecimento", _tech_rate(total_leads, total_enriched))
     hot_ratio = qualified_count / max(total_leads, 1)
     hot_color = "#10B981" if hot_ratio >= 0.2 else "#F97316"
-    with col_k3:
+    with col_k4:
         st.markdown(
             f"""
             <style>
@@ -627,19 +715,57 @@ def _render_vault() -> None:
             municipio = st.text_input("Municipio")
         with col_f4:
             contact_quality = st.selectbox("Contact quality", options=["", "ok", "suspicious", "accountant_like"])
+        col_f5, col_f6 = st.columns(2, gap="medium")
+        with col_f5:
+            page_size = st.selectbox(
+                "Resultados por pagina",
+                options=[50, 100, 200, 500, 1000],
+                index=2,
+                key="vault_page_size",
+            )
+
+        filter_min_score = min_score if min_score > 0 else None
+        filter_min_tech = min_tech_score if min_tech_score > 0 else None
+        filter_contact = contact_quality or None
+        filter_municipio = municipio or None
+
+        filtered_total = storage.count_enrichment_vault(
+            min_score=filter_min_score,
+            min_tech_score=filter_min_tech,
+            contact_quality=filter_contact,
+            municipio=filter_municipio,
+        )
+        max_page = max(1, math.ceil(filtered_total / page_size)) if page_size else 1
+        current_page = int(st.session_state.get("vault_page", 1))
+        if current_page > max_page:
+            current_page = max_page
+            st.session_state["vault_page"] = current_page
+        with col_f6:
+            page = st.number_input(
+                "Pagina",
+                min_value=1,
+                max_value=max_page,
+                value=current_page,
+                step=1,
+                key="vault_page",
+            )
 
     vault_rows = storage.query_enrichment_vault(
-        min_score=min_score if min_score > 0 else None,
-        min_tech_score=min_tech_score if min_tech_score > 0 else None,
-        contact_quality=contact_quality or None,
-        municipio=municipio or None,
-        limit=200,
-        offset=0,
+        min_score=filter_min_score,
+        min_tech_score=filter_min_tech,
+        contact_quality=filter_contact,
+        municipio=filter_municipio,
+        limit=page_size,
+        offset=(page - 1) * page_size,
     )
 
     if not vault_rows:
         _render_empty_state()
         return
+
+    shown_count = len(vault_rows)
+    if filtered_total:
+        st.caption(f"Mostrando {shown_count} de {filtered_total} leads enriquecidos. Pagina {page} de {max_page}.")
 
     df_vault = pd.DataFrame(vault_rows)
     df_vault["status_label"] = df_vault["score_v2"].apply(_status_label)
@@ -686,27 +812,63 @@ def _render_vault() -> None:
     selected_payload = df_vault.loc[selected_idx].to_dict(orient="records") if selected_idx else []
 
     _micro_label("ACTIONS")
-    col_a, col_b = st.columns([1, 2])
-    with col_a:
-        csv_data = df_vault.to_csv(index=False)
-        st.download_button("Exportar CSV", data=csv_data, file_name="hunter_vault.csv", mime="text/csv")
-    with col_b:
-        webhook_url = storage.config_get("webhook_url") or ""
-        if st.button("⚡ Disparar Webhook (CRM)", type="primary", key="vault_webhook"):
-            if not selected_payload:
-                st.toast("Selecione ao menos um lead.", icon="⚠️")
-            elif not webhook_url:
-                st.toast("Configure a URL do webhook no System Core.", icon="⚠️")
+    with st.container(border=True):
+        col_a, col_b = st.columns([2, 3], gap="medium")
+        with col_a:
+            export_scope = st.radio(
+                "Exportar CSV",
+                options=["Pagina atual", "Todos filtrados", "Selecionados"],
+                index=1,
+                key="vault_export_scope",
+            )
+            if export_scope == "Selecionados" and not selected_payload:
+                st.caption("Selecione ao menos um lead para exportar.")
+
+            if export_scope == "Todos filtrados":
+                export_rows = _fetch_all_vault_rows(
+                    min_score=filter_min_score,
+                    min_tech_score=filter_min_tech,
+                    contact_quality=filter_contact,
+                    municipio=filter_municipio,
+                )
+            elif export_scope == "Selecionados":
+                export_rows = selected_payload
             else:
-                try:
-                    result = webhook_exports.send_batch_to_webhook(selected_payload, webhook_url)
-                    st.toast(
-                        f"Webhook enviado. Sucesso: {result.get('sent', 0)} | Falhas: {result.get('failed', 0)}.",
-                        icon="✅",
-                    )
-                except Exception as exc:
-                    st.error("Falha ao enviar webhook. Verifique a integracao.")
-                    logger.warning("webhook_send failed: %s", exc)
+                export_rows = df_vault.to_dict(orient="records")
+
+            export_df = _build_export_df(export_rows)
+            export_suffix = {
+                "Pagina atual": "pagina",
+                "Todos filtrados": "completo",
+                "Selecionados": "selecionados",
+            }[export_scope]
+            csv_data = export_df.to_csv(index=False)
+            st.download_button(
+                "Exportar CSV",
+                data=csv_data,
+                file_name=f"hunter_vault_{export_suffix}.csv",
+                mime="text/csv",
+                disabled=export_df.empty,
+            )
+            if not export_df.empty:
+                st.caption(f"{len(export_df)} linhas no CSV.")
+        with col_b:
+            webhook_url = storage.config_get("webhook_url") or ""
+            if st.button("⚡ Disparar Webhook (CRM)", type="primary", key="vault_webhook"):
+                if not selected_payload:
+                    st.toast("Selecione ao menos um lead.", icon="⚠️")
+                elif not webhook_url:
+                    st.toast("Configure a URL do webhook no System Core.", icon="⚠️")
+                else:
+                    try:
+                        result = webhook_exports.send_batch_to_webhook(selected_payload, webhook_url)
+                        st.toast(
+                            f"Webhook enviado. Sucesso: {result.get('sent', 0)} | Falhas: {result.get('failed', 0)}.",
+                            icon="✅",
+                        )
+                    except Exception as exc:
+                        st.error("Falha ao enviar webhook. Verifique a integracao.")
+                        logger.warning("webhook_send failed: %s", exc)
 
 
 def _render_system_core() -> None:

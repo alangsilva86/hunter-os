@@ -1099,6 +1099,41 @@ def query_enrichment_vault(
     return [dict(row) for row in rows]
 
 
+def count_enrichment_vault(
+    min_score: Optional[int] = None,
+    min_tech_score: Optional[int] = None,
+    contact_quality: Optional[str] = None,
+    municipio: Optional[str] = None,
+    has_marketing: Optional[bool] = None,
+) -> int:
+    clauses = []
+    params: List[Any] = []
+    if min_score is not None:
+        clauses.append("c.score_v2 >= ?")
+        params.append(min_score)
+    if min_tech_score is not None:
+        clauses.append("e.tech_score >= ?")
+        params.append(min_tech_score)
+    if contact_quality:
+        clauses.append("c.contact_quality = ?")
+        params.append(contact_quality)
+    if municipio:
+        clauses.append("c.municipio = ?")
+        params.append(municipio)
+    if has_marketing is not None:
+        clauses.append("e.has_marketing = ?")
+        params.append(1 if has_marketing else 0)
+
+    where_sql = f"WHERE {' AND '.join(clauses)}" if clauses else ""
+    sql = (
+        "SELECT COUNT(*) AS cnt FROM enrichments e LEFT JOIN leads_clean c ON c.cnpj = e.cnpj "
+        f"{where_sql}"
+    )
+    with get_conn() as conn:
+        row = conn.execute(sql, params).fetchone()
+    return int(row["cnt"])
+
+
 def count_leads_clean() -> int:
     with get_conn() as conn:
         row = conn.execute("SELECT COUNT(*) AS cnt FROM leads_clean").fetchone()
