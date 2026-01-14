@@ -247,12 +247,33 @@ class HunterOrchestrator:
     def _poll_public_link(self, export_uuid: str, run_id: str) -> Optional[Dict[str, Any]]:
         client = data_sources.CasaDosDadosClient()
         url = data_sources.CASA_DOS_DADOS_EXPORT_STATUS_V4_PUBLIC_URL.format(arquivo_uuid=export_uuid)
+        if "?" in url:
+            url = f"{url}&corpo"
+        else:
+            url = f"{url}?corpo"
         resp = client._get(url, run_id=run_id, step_name="v3_export_poll_public")
         if resp.status_code == 202:
             return {"status": "processing"}
         if resp.status_code == 200:
-            data = resp.json()
+            try:
+                data = resp.json()
+            except ValueError:
+                storage.log_event(
+                    "warning",
+                    "v3_export_poll_public_non_json",
+                    {
+                        "run_id": run_id,
+                        "status_code": resp.status_code,
+                        "body_excerpt": data_sources._response_excerpt(resp),
+                    },
+                )
+                return {"status": "error", "reason": "non_json"}
+            status_value = str(data.get("status") or "").lower()
+            if status_value in {"processando", "processing", "pending"}:
+                return {"status": "processing"}
             link = data.get("link") or data.get("url")
+            if not link:
+                return {"status": "error", "reason": "missing_link"}
             return {
                 "status": "ready",
                 "link": link,
