@@ -71,7 +71,7 @@ def _fetch_targets(limit: int) -> List[str]:
             """,
             (limit,),
         ).fetchall()
-    return [row["cnpj"] for row in rows if row.get("cnpj")]
+    return [row["cnpj"] for row in rows if row["cnpj"]]
 
 
 def _fetch_existing(cnpjs: List[str]) -> Dict[str, Dict[str, Any]]:
