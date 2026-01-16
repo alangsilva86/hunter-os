@@ -45,6 +45,7 @@ def _process_leads(
         min_repeat=params["telefone_repeat_threshold"],
         return_stats=True,
     )
+    storage.upsert_socios_from_leads(cleaned)
     storage.record_run_step(
         run_id=run_id,
         step_name="cleaning",

@@ -2,6 +2,7 @@
 
 import json
 import re
+import unicodedata
 from typing import Any, Dict, List, Tuple
 
 from modules.cleaning import CNAE_PRIORITARIOS
@@ -43,6 +44,54 @@ def _as_list(value: Any) -> List[Any]:
     return [value]
 
 
+def _normalize_token(text: str) -> str:
+    decomposed = unicodedata.normalize("NFD", text or "")
+    cleaned = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
+    return re.sub(r"[^a-z0-9]", "", cleaned.lower())
+
+
+def _socios_names(value: Any) -> List[str]:
+    socios = _as_list(value)
+    names: List[str] = []
+    for socio in socios:
+        if isinstance(socio, dict):
+            name = (
+                socio.get("nome_socio")
+                or socio.get("nome")
+                or socio.get("socio")
+                or socio.get("name")
+                or socio.get("representante")
+                or ""
+            )
+        else:
+            name = str(socio)
+        name = name.strip()
+        if name:
+            names.append(name)
+    return names
+
+
+def partner_email_match(emails: Any, socios: Any) -> Tuple[bool, Any]:
+    email_list = [str(item).strip().lower() for item in _as_list(emails) if item]
+    socio_names = _socios_names(socios)
+    for email in email_list:
+        local = email.split("@")[0]
+        local_norm = _normalize_token(local)
+        if not local_norm:
+            continue
+        for name in socio_names:
+            parts = [part for part in re.split(r"\s+", name) if part]
+            if len(parts) < 2:
+                continue
+            first = _normalize_token(parts[0])
+            last = _normalize_token(parts[-1])
+            if len(first) < 3 or len(last) < 3:
+                continue
+            if first in local_norm and last in local_norm:
+                return True, email
+    return False, None
+
+
 def _determine_profile(lead: Dict[str, Any], enrichment: Dict[str, Any]) -> str:
     cnae = str(lead.get("cnae") or "")
     instagram = enrichment.get("instagram")
@@ -63,7 +112,7 @@ def _determine_profile(lead: Dict[str, Any], enrichment: Dict[str, Any]) -> str:
 def score_with_reasons(lead: Dict[str, Any], enrichment: Dict[str, Any]) -> Tuple[int, List[str], str]:
     score = 50
     reasons: List[str] = []
-    flags = lead.get("flags", {})
+    flags = lead.setdefault("flags", {})
 
     website_confidence = int(enrichment.get("website_confidence") or 0)
     tech_score = int(enrichment.get("tech_score") or 0)
@@ -84,6 +133,15 @@ def score_with_reasons(lead: Dict[str, Any], enrichment: Dict[str, Any]) -> Tupl
     if golden_techs and tech_confidence >= 60:
         score = 80
         reasons.append("golden_tech_gate")
+
+    partner_match, _matched_email = partner_email_match(
+        lead.get("emails_norm") or lead.get("emails") or lead.get("email"),
+        lead.get("socios") or lead.get("socios_json") or lead.get("quadro_societario"),
+    )
+    if partner_match:
+        score += 20
+        reasons.append("decision_maker_email")
+    flags["is_decision_maker_email"] = bool(partner_match)
 
     if enrichment.get("linkedin_company"):
         score += 10
@@ -148,7 +206,7 @@ def score_with_reasons(lead: Dict[str, Any], enrichment: Dict[str, Any]) -> Tupl
         reasons.append("website_confidence_gate")
 
     score = max(0, min(score, 100))
-    score_version = "v4"
+    score_version = "v5"
     return score, reasons[:5], score_version
 
 

@@ -126,10 +126,45 @@ def accountant_like(raw: Dict[str, Any], emails: List[str]) -> bool:
     return False
 
 
+def _extract_socios(raw: Dict[str, Any]) -> List[Dict[str, Any]]:
+    socios_raw = raw.get("quadro_societario") or raw.get("socios") or raw.get("socios_qsa") or []
+    socios: List[Dict[str, Any]] = []
+    for socio in socios_raw or []:
+        if not socio:
+            continue
+        if isinstance(socio, dict):
+            nome = socio.get("nome_socio") or socio.get("nome") or socio.get("socio") or socio.get("name") or ""
+            qualificacao = socio.get("qualificacao") or socio.get("qual") or socio.get("qualificacao_socio") or ""
+            cpf = socio.get("cpf") or socio.get("documento") or ""
+            idade = socio.get("idade")
+            fonte = socio.get("fonte") or raw.get("fonte")
+        else:
+            nome = str(socio)
+            qualificacao = ""
+            cpf = ""
+            idade = None
+            fonte = raw.get("fonte")
+        nome = str(nome).strip()
+        qualificacao = str(qualificacao).strip()
+        if not nome:
+            continue
+        socios.append(
+            {
+                "nome_socio": nome,
+                "qualificacao": qualificacao,
+                "cpf": cpf,
+                "idade": idade,
+                "fonte": fonte,
+            }
+        )
+    return socios
+
+
 def clean_lead(raw: Dict[str, Any], exclude_mei: bool = True) -> Optional[Dict[str, Any]]:
     if exclude_mei and is_mei(raw):
         return None
 
+    socios = _extract_socios(raw)
     phones = extract_phones(raw)
     emails = extract_emails(raw)
     flags = {
@@ -143,6 +178,7 @@ def clean_lead(raw: Dict[str, Any], exclude_mei: bool = True) -> Optional[Dict[s
             raw.get("municipio", ""),
             raw.get("uf", ""),
         ),
+        "is_decision_maker_email": False,
     }
 
     endereco_parts = [
@@ -167,6 +203,7 @@ def clean_lead(raw: Dict[str, Any], exclude_mei: bool = True) -> Optional[Dict[s
         "endereco_norm": endereco,
         "telefones_norm": phones,
         "emails_norm": emails,
+        "socios": socios,
         "flags": flags,
     }
 

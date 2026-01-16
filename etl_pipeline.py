@@ -425,6 +425,7 @@ class HunterOrchestrator:
             min_repeat=int(filters.get("telefone_repeat_threshold") or 5),
             return_stats=True,
         )
+        storage.upsert_socios_from_leads(cleaned)
         for lead in cleaned:
             lead["score_v1"] = scoring.score_v1(lead)
         storage.upsert_leads_clean(cleaned)

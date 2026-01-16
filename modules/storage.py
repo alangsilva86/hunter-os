@@ -85,6 +85,7 @@ def init_db() -> None:
                 endereco_norm TEXT,
                 telefones_norm TEXT,
                 emails_norm TEXT,
+                socios_json TEXT,
                 flags_json TEXT,
                 score_v1 REAL,
                 score_v2 REAL,
@@ -94,6 +95,7 @@ def init_db() -> None:
             )
             """
         )
+        _ensure_column(conn, "leads_clean", "socios_json", "TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_clean_score ON leads_clean(score_v2)")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_leads_clean_city ON leads_clean(municipio, uf)")
 
@@ -671,11 +673,77 @@ def list_leads_raw_sources_between(start_ts: str, end_ts: str) -> List[Dict[str,
     return [dict(row) for row in rows]
 
 
+def upsert_socios_from_leads(leads: List[Dict[str, Any]]) -> None:
+    if not leads:
+        return
+    rows: List[Tuple[Any, ...]] = []
+    cnpjs: set = set()
+
+    def _parse_socios(raw: Any) -> List[Dict[str, Any]]:
+        if not raw:
+            return []
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                return []
+            raw = parsed
+        if isinstance(raw, dict):
+            return [raw]
+        if isinstance(raw, list):
+            return [item for item in raw if item]
+        return []
+
+    for lead in leads:
+        cnpj = lead.get("cnpj")
+        socios_raw = lead.get("socios") or lead.get("socios_json") or []
+        socios = _parse_socios(socios_raw)
+        if not cnpj or not socios:
+            continue
+        cnpjs.add(cnpj)
+        for socio in socios:
+            if isinstance(socio, dict):
+                nome = socio.get("nome_socio") or socio.get("nome") or socio.get("socio") or socio.get("name") or ""
+                qualificacao = socio.get("qualificacao") or socio.get("qual") or socio.get("qualificacao_socio") or ""
+                cpf = socio.get("cpf") or socio.get("documento") or ""
+                idade = socio.get("idade")
+                fonte = socio.get("fonte") or lead.get("fonte") or lead.get("source")
+            else:
+                nome = str(socio)
+                qualificacao = ""
+                cpf = ""
+                idade = None
+                fonte = lead.get("fonte") or lead.get("source")
+            nome = (nome or "").strip()
+            qualificacao = (qualificacao or "").strip()
+            if not nome:
+                continue
+            rows.append((cnpj, nome, cpf, idade, qualificacao, fonte, _utcnow()))
+
+    if not rows or not cnpjs:
+        return
+
+    placeholders = ",".join(["?"] * len(cnpjs))
+    with get_conn() as conn:
+        conn.execute(f"DELETE FROM socios WHERE cnpj IN ({placeholders})", list(cnpjs))
+        conn.executemany(
+            """
+            INSERT INTO socios (cnpj, nome_socio, cpf, idade, qualificacao, fonte, created_at)
+            VALUES (?, ?, ?, ?, ?, ?, ?)
+            """,
+            rows,
+        )
+
+
 def upsert_leads_clean(leads: List[Dict[str, Any]]) -> None:
     if not leads:
         return
     rows = []
     for lead in leads:
+        socios = lead.get("socios")
+        if socios is None:
+            socios = lead.get("socios_json", [])
+        socios_json = socios if isinstance(socios, str) else json.dumps(socios, ensure_ascii=False)
         rows.append(
             (
                 lead.get("cnpj"),
@@ -691,6 +759,7 @@ def upsert_leads_clean(leads: List[Dict[str, Any]]) -> None:
                 lead.get("endereco_norm"),
                 json.dumps(lead.get("telefones_norm", []), ensure_ascii=False),
                 json.dumps(lead.get("emails_norm", []), ensure_ascii=False),
+                socios_json,
                 json.dumps(lead.get("flags", {}), ensure_ascii=False),
                 lead.get("score_v1"),
                 lead.get("score_v2"),
@@ -705,9 +774,9 @@ def upsert_leads_clean(leads: List[Dict[str, Any]]) -> None:
             INSERT INTO leads_clean (
                 cnpj, razao_social, nome_fantasia, cnae, cnae_desc, porte,
                 natureza_juridica, capital_social, municipio, uf, endereco_norm,
-                telefones_norm, emails_norm, flags_json, score_v1, score_v2,
+                telefones_norm, emails_norm, socios_json, flags_json, score_v1, score_v2,
                 score_label, contact_quality, updated_at
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(cnpj) DO UPDATE SET
                 razao_social=excluded.razao_social,
                 nome_fantasia=excluded.nome_fantasia,
@@ -721,6 +790,7 @@ def upsert_leads_clean(leads: List[Dict[str, Any]]) -> None:
                 endereco_norm=excluded.endereco_norm,
                 telefones_norm=excluded.telefones_norm,
                 emails_norm=excluded.emails_norm,
+                socios_json=excluded.socios_json,
                 flags_json=excluded.flags_json,
                 score_v1=excluded.score_v1,
                 score_v2=excluded.score_v2,
@@ -1095,7 +1165,7 @@ def fetch_enrichment_vault(limit: int = 100, offset: int = 0) -> List[Dict[str, 
             """
             SELECT e.*, c.razao_social, c.nome_fantasia, c.cnae, c.municipio, c.uf,
                    c.score_v2, c.score_label, c.contact_quality, c.telefones_norm,
-                   c.emails_norm, c.flags_json, c.porte, c.endereco_norm
+                   c.emails_norm, c.socios_json, c.flags_json, c.porte, c.endereco_norm
             FROM enrichments e
             LEFT JOIN leads_clean c ON c.cnpj = e.cnpj
             ORDER BY e.enriched_at DESC
@@ -1151,7 +1221,7 @@ def _vault_select_sql() -> str:
         "SELECT "
         "lc.cnpj, lc.razao_social, lc.nome_fantasia, lc.cnae, lc.cnae_desc, lc.porte, "
         "lc.natureza_juridica, lc.capital_social, lc.municipio, lc.uf, lc.endereco_norm, "
-        "lc.telefones_norm, lc.emails_norm, lc.flags_json, lc.score_v1, lc.score_v2, "
+        "lc.telefones_norm, lc.emails_norm, lc.socios_json, lc.flags_json, lc.score_v1, lc.score_v2, "
         "lc.score_label, lc.contact_quality, lc.updated_at, "
         "e.run_id, e.site, e.instagram, e.linkedin_company, e.linkedin_people_json, "
         "e.google_maps_url, e.has_contact_page, e.has_form, e.tech_stack_json, "

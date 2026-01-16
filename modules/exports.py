@@ -3,14 +3,14 @@
 import json
 import logging
 import re
-from typing import Any, Dict, Iterable, List, Optional
+from typing import Any, Dict, Iterable, List, Optional, Tuple
 
 import pandas as pd
 from uuid import uuid4
 
 import requests
 
-from modules import storage
+from modules import storage, scoring
 
 logger = logging.getLogger("hunter")
 
@@ -334,3 +334,140 @@ def format_export_data(
 
     columns = export_columns + (debug_columns if mode == "debug" else [])
     return df[columns]
+
+
+def export_to_meta_ads(
+    df: pd.DataFrame,
+    socios_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
+) -> pd.DataFrame:
+    if df.empty:
+        return df
+
+    df = df.fillna("")
+    excluded_keywords = ("contabil", "fiscal", "financeiro", "admin", "contato")
+    personal_domains = ("gmail.com", "uol.com", "uol.com.br")
+
+    def _filter_emails(raw: Any) -> List[str]:
+        emails = _coerce_list(raw)
+        cleaned: List[str] = []
+        for item in emails:
+            email = str(item).strip().lower()
+            if not email:
+                continue
+            if any(keyword in email for keyword in excluded_keywords):
+                continue
+            cleaned.append(email)
+        return cleaned
+
+    def _pick_socios(row: pd.Series) -> List[Any]:
+        cnpj = row.get("cnpj")
+        if socios_map and cnpj in socios_map:
+            return socios_map.get(cnpj) or []
+        return _coerce_list(row.get("socios_json") or row.get("socios"))
+
+    def _partner_flag(row: pd.Series, socios: Any) -> Tuple[bool, Optional[str]]:
+        emails = _filter_emails(row.get("emails_norm") or row.get("emails") or row.get("email"))
+        if not emails:
+            return False, None
+        match, matched_email = scoring.partner_email_match(emails, socios)
+        flags = _parse_json(row.get("flags_json"))
+        partner_match = bool(match or flags.get("is_decision_maker_email"))
+        if partner_match:
+            return True, matched_email or emails[0]
+        return False, None
+
+    def _select_email(row: pd.Series, socios: Any) -> str:
+        emails = _filter_emails(row.get("emails_norm") or row.get("emails") or row.get("email"))
+        if not emails:
+            return ""
+        partner_match, matched_email = _partner_flag(row, socios)
+        if partner_match:
+            personal = [email for email in emails if any(email.endswith(dom) for dom in personal_domains)]
+            if personal:
+                return personal[0]
+            if matched_email and matched_email in emails:
+                return matched_email
+        return emails[0]
+
+    def _select_phone(value: Any) -> str:
+        for phone in _coerce_list(value):
+            digits = _digits_only(phone)
+            if not digits:
+                continue
+            if digits.startswith("55"):
+                normalized = digits
+            elif len(digits) in {10, 11}:
+                normalized = f"55{digits}"
+            else:
+                normalized = f"55{digits}"
+            return f"+{normalized}"
+        return ""
+
+    def _main_partner_name(socios: List[Any]) -> str:
+        if not socios:
+            return ""
+
+        def _weight(socio: Any) -> int:
+            qual = ""
+            if isinstance(socio, dict):
+                qual = (
+                    socio.get("qualificacao")
+                    or socio.get("qual")
+                    or socio.get("qualificacao_socio")
+                    or ""
+                )
+            qual_norm = str(qual).lower()
+            if any(token in qual_norm for token in ("administrador", "diretor", "presidente", "owner")):
+                return 2
+            return 1
+
+        best = max(socios, key=_weight)
+        if isinstance(best, dict):
+            return (
+                best.get("nome_socio")
+                or best.get("nome")
+                or best.get("socio")
+                or best.get("name")
+                or ""
+            ).strip()
+        return str(best).strip()
+
+    def _split_name(full_name: str) -> Tuple[str, str]:
+        parts = [part for part in re.split(r"\s+", full_name.strip()) if part]
+        if len(parts) >= 2:
+            return parts[0].title(), " ".join(parts[1:]).title()
+        if parts:
+            return parts[0].title(), ""
+        return "", ""
+
+    records: List[Dict[str, Any]] = []
+    for _, row in df.iterrows():
+        socios = _pick_socios(row)
+        email = _select_email(row, socios)
+        phone = _select_phone(row.get("telefones_norm"))
+        if not email and not phone:
+            continue
+
+        partner_name = _main_partner_name(socios)
+        fn, ln = _split_name(partner_name)
+        try:
+            value = float(row.get("capital_social") or 0)
+        except (TypeError, ValueError):
+            value = 0
+
+        records.append(
+            {
+                "email": email,
+                "phone": phone,
+                "fn": fn,
+                "ln": ln,
+                "city": row.get("municipio") or "",
+                "st": row.get("uf") or "",
+                "value": value,
+            }
+        )
+
+    result = pd.DataFrame(records)
+    if result.empty:
+        return result
+    return result.drop_duplicates(subset=["email", "phone"])

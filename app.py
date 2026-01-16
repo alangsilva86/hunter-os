@@ -792,6 +792,8 @@ def _render_vault() -> None:
                 else:
                     leads: List[Dict[str, Any]] = []
                     lead_map: Dict[str, Dict[str, Any]] = {}
+                    cnpjs_pending = [row.get("cnpj") for row in pending_rows if row.get("cnpj")]
+                    socios_map = storage.fetch_socios_by_cnpjs(cnpjs_pending)
                     for row in pending_rows:
                         lead = {
                             "cnpj": row.get("cnpj"),
@@ -800,10 +802,14 @@ def _render_vault() -> None:
                             "municipio": row.get("municipio"),
                             "uf": row.get("uf"),
                             "porte": row.get("porte"),
+                            "score_v1": row.get("score_v1"),
+                            "score_v2": row.get("score_v2"),
                             "contact_quality": row.get("contact_quality"),
                             "flags": _parse_json(row.get("flags_json")),
                             "emails_norm": _parse_json_list(row.get("emails_norm")),
                         }
+                        if lead.get("cnpj") and lead.get("cnpj") in socios_map:
+                            lead["socios"] = socios_map.get(lead["cnpj"])
                         leads.append(lead)
                         if lead.get("cnpj"):
                             lead_map[lead["cnpj"]] = lead
@@ -936,6 +942,8 @@ def _render_vault() -> None:
                 "Selecionados": "selecionados",
             }[export_scope]
             csv_data = export_df.to_csv(index=False)
+            meta_df = webhook_exports.export_to_meta_ads(pd.DataFrame(export_rows), socios_map=socios_map)
+            meta_csv = meta_df.to_csv(index=False)
             st.download_button(
                 "Exportar CSV",
                 data=csv_data,
@@ -945,6 +953,15 @@ def _render_vault() -> None:
             )
             if not export_df.empty:
                 st.caption(f"{len(export_df)} linhas no CSV.")
+            st.download_button(
+                "📥 Baixar Lista para Meta Ads (LAL)",
+                data=meta_csv,
+                file_name=f"hunter_meta_ads_{export_suffix}.csv",
+                mime="text/csv",
+                disabled=meta_df.empty,
+            )
+            if not meta_df.empty:
+                st.caption(f"{len(meta_df)} linhas no CSV Meta Ads.")
         with col_b:
             webhook_url = storage.config_get("webhook_url") or ""
             if st.button("⚡ Disparar Webhook (CRM)", type="primary", key="vault_webhook"):

@@ -150,6 +150,35 @@ def _simplify_legal_name(name: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def _extract_socios_names_from_lead(lead: Dict[str, Any]) -> List[str]:
+    names: List[str] = []
+    for key in ("socios", "socios_json", "quadro_societario"):
+        raw = lead.get(key)
+        if not raw:
+            continue
+        if isinstance(raw, str):
+            try:
+                parsed = json.loads(raw)
+            except Exception:
+                parsed = raw
+            raw_items = parsed if isinstance(parsed, list) else [parsed]
+        elif isinstance(raw, list):
+            raw_items = raw
+        else:
+            raw_items = [raw]
+        for item in raw_items:
+            if not item:
+                continue
+            if isinstance(item, dict):
+                name = item.get("nome_socio") or item.get("nome") or item.get("socio") or item.get("name") or ""
+            else:
+                name = str(item)
+            name = name.strip()
+            if name:
+                names.append(name)
+    return list(dict.fromkeys(names))[:5]
+
+
 def _extract_domain(url: str) -> str:
     if not url:
         return ""
@@ -336,6 +365,37 @@ class AsyncEnricher:
         data = await self.provider.search(session, query)
         storage.cache_set(cache_key, data, ttl_hours=self.cache_ttl_hours)
         return data
+
+    async def _search_linkedin_people(
+        self,
+        session: aiohttp.ClientSession,
+        lead: Dict[str, Any],
+        socio_names: List[str],
+    ) -> List[str]:
+        if not socio_names:
+            return []
+        razao = (lead.get("razao_social") or lead.get("nome_fantasia") or "").strip()
+        found_links: List[str] = []
+        for name in socio_names:
+            query = f'site:linkedin.com/in/ "{name}" "{razao}"'.strip()
+            if not query:
+                continue
+            try:
+                search_data = await self._search(session, query)
+            except ProviderResponseError:
+                continue
+            links = search_data.get("linkedin_people", []) or []
+            for item in search_data.get("candidates", []) or []:
+                url = item.get("url") or item.get("link")
+                if url and "linkedin.com/in/" in url:
+                    links.append(url)
+            for url in links:
+                if "linkedin.com/in/" not in (url or ""):
+                    continue
+                found_links.append(url.split("?")[0])
+            if found_links:
+                break
+        return list(dict.fromkeys(found_links))[:5]
 
     async def _discover_website(self, session: aiohttp.ClientSession, lead: Dict[str, Any]) -> Dict[str, Any]:
         discovery_start = time.time()
@@ -588,6 +648,20 @@ class AsyncEnricher:
                             result["tech_score"] = max(result["tech_score"], detection_extra.get("tech_score", 0))
                             result["tech_confidence"] = max(result["tech_confidence"], detection_extra.get("confidence", 0))
                         break
+
+        try:
+            score_gate = max(
+                int(float(lead.get("score_v2") or 0)),
+                int(float(lead.get("score_v1") or 0)),
+            )
+        except Exception:
+            score_gate = 0
+        socio_names = _extract_socios_names_from_lead(lead)
+        if score_gate > 60 and socio_names:
+            linkedin_people = await self._search_linkedin_people(session, lead, socio_names)
+            if linkedin_people:
+                combined = list(dict.fromkeys(result.get("linkedin_people", []) + linkedin_people))
+                result["linkedin_people"] = combined[:5]
 
         return result
 
@@ -1142,6 +1216,41 @@ async def enrich_leads_hybrid(
                         "low_confidence_site": low_confidence_site,
                     }
                 )
+
+            try:
+                score_gate = max(
+                    int(float(lead.get("score_v2") or 0)),
+                    int(float(lead.get("score_v1") or 0)),
+                )
+            except Exception:
+                score_gate = 0
+            socio_names = _extract_socios_names_from_lead(lead)
+            if score_gate > 60 and socio_names:
+                razao = (lead.get("razao_social") or lead.get("nome_fantasia") or "").strip()
+                for socio_name in socio_names:
+                    query = f'site:linkedin.com/in/ "{socio_name}" "{razao}"'.strip()
+                    try:
+                        await limiter.acquire()
+                        people_data = await provider.search(session, query)
+                    except ProviderResponseError as exc:
+                        if exc.status_code == 429:
+                            await limiter.reduce()
+                        people_data = {}
+                    except Exception:
+                        people_data = {}
+                    finally:
+                        limiter.release()
+
+                    links = people_data.get("linkedin_people", []) if people_data else []
+                    for item in (people_data.get("candidates", []) or []):
+                        url = item.get("url") or item.get("link")
+                        if url and "linkedin.com/in/" in url:
+                            links.append(url)
+                    cleaned_links = [url.split("?")[0] for url in links if url and "linkedin.com/in/" in url]
+                    if cleaned_links:
+                        merged = list(dict.fromkeys(result.get("linkedin_people", []) + cleaned_links))
+                        result["linkedin_people"] = merged[:5]
+                        break
         except Exception as exc:
             result["notes"] = _sanitize_error_message(str(exc))
 
