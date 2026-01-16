@@ -806,10 +806,22 @@ def _render_vault() -> None:
         with col_info:
             st.caption(f"Leads aguardando enriquecimento: {pending_total}")
         with col_btn:
-            if st.button("⚡ Enriquecer Lote (Proximos 50)", type="primary", key="vault_enrich_batch"):
+            batch_size = st.number_input(
+                "Batch size",
+                min_value=10,
+                max_value=500,
+                value=50,
+                step=10,
+                key="vault_enrich_batch_size",
+            )
+            if st.button(
+                f"⚡ Enriquecer Lote (Proximos {int(batch_size)})",
+                type="primary",
+                key="vault_enrich_batch",
+            ):
                 pending_rows = storage.get_vault_data(
                     page=1,
-                    page_size=50,
+                    page_size=int(batch_size),
                     filters=filters,
                     status_filter="pending",
                 )
