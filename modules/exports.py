@@ -347,14 +347,46 @@ def export_to_meta_ads(
     excluded_keywords = ("contabil", "fiscal", "financeiro", "admin", "contato")
     personal_domains = ("gmail.com", "uol.com", "uol.com.br")
 
-    def _filter_emails(raw: Any) -> List[str]:
-        emails = _coerce_list(raw)
+    def _collect_emails(row: pd.Series) -> List[str]:
+        values: List[str] = []
+        raw_fields = [
+            row.get("emails_norm"),
+            row.get("emails"),
+            row.get("email"),
+        ]
+        for raw in raw_fields:
+            if not raw:
+                continue
+            items = _coerce_list(raw)
+            if isinstance(raw, str):
+                raw_str = raw.strip()
+                if items == [raw] and raw_str.startswith("[") and raw_str.endswith("]"):
+                    inner = raw_str[1:-1].strip()
+                    if inner:
+                        items = [part.strip().strip("\"'") for part in inner.split(",") if part.strip()]
+                if items == [raw] and re.search(r"[;,]", raw_str):
+                    items = [part.strip() for part in re.split(r"[;,]", raw_str) if part.strip()]
+            for item in items:
+                if item:
+                    values.append(str(item))
+
+        flat = row.get("E-mails") or row.get("emails_flat")
+        if flat:
+            for part in re.split(r"[;,]", str(flat)):
+                if part.strip():
+                    values.append(part.strip())
+
+        return list(dict.fromkeys(values))
+
+    def _filter_emails(emails: List[str]) -> List[str]:
         cleaned: List[str] = []
         for item in emails:
             email = str(item).strip().lower()
-            if not email:
+            email = email.strip(" \"'<>[]()")
+            if not email or "@" not in email:
                 continue
-            if any(keyword in email for keyword in excluded_keywords):
+            local = email.split("@")[0]
+            if any(keyword in local for keyword in excluded_keywords):
                 continue
             cleaned.append(email)
         return cleaned
@@ -366,7 +398,7 @@ def export_to_meta_ads(
         return _coerce_list(row.get("socios_json") or row.get("socios"))
 
     def _partner_flag(row: pd.Series, socios: Any) -> Tuple[bool, Optional[str]]:
-        emails = _filter_emails(row.get("emails_norm") or row.get("emails") or row.get("email"))
+        emails = _filter_emails(_collect_emails(row))
         if not emails:
             return False, None
         match, matched_email = scoring.partner_email_match(emails, socios)
@@ -377,7 +409,7 @@ def export_to_meta_ads(
         return False, None
 
     def _select_email(row: pd.Series, socios: Any) -> str:
-        emails = _filter_emails(row.get("emails_norm") or row.get("emails") or row.get("email"))
+        emails = _filter_emails(_collect_emails(row))
         if not emails:
             return ""
         partner_match, matched_email = _partner_flag(row, socios)
@@ -440,6 +472,15 @@ def export_to_meta_ads(
             return parts[0].title(), ""
         return "", ""
 
+    def _name_from_email(email: str) -> str:
+        if not email or "@" not in email:
+            return ""
+        local = email.split("@")[0]
+        parts = [part for part in re.split(r"[._-]+", local) if part]
+        if not parts:
+            return ""
+        return " ".join(parts)
+
     records: List[Dict[str, Any]] = []
     for _, row in df.iterrows():
         socios = _pick_socios(row)
@@ -449,6 +490,8 @@ def export_to_meta_ads(
             continue
 
         partner_name = _main_partner_name(socios)
+        if not partner_name:
+            partner_name = _name_from_email(email)
         fn, ln = _split_name(partner_name)
         try:
             value = float(row.get("capital_social") or 0)
@@ -461,7 +504,7 @@ def export_to_meta_ads(
                 "phone": phone,
                 "fn": fn,
                 "ln": ln,
-                "city": row.get("municipio") or "",
+                "city": row.get("municipio") or row.get("cidade") or row.get("city") or "",
                 "st": row.get("uf") or "",
                 "value": value,
             }

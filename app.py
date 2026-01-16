@@ -575,6 +575,19 @@ def _render_mission_control() -> None:
             col_s3.metric("Estrategia", run.get("strategy") or "-")
             col_s4.metric("Worker", "rodando" if running else "parado")
 
+            last_log = storage.fetch_logs(limit=1, run_id=active_run_id)
+            if last_log:
+                last_entry = last_log[0]
+                detail = _parse_json(last_entry.get("detail_json") or "{}")
+                message = detail.get("message") or detail.get("error") or detail.get("hint") or ""
+                extra = detail.get("stage") or detail.get("status") or ""
+                info = f"{last_entry.get('created_at')} | {last_entry.get('event')}"
+                if extra:
+                    info = f"{info} | {extra}"
+                if message:
+                    info = f"{info} | {message}"
+                st.caption(f"Ultimo evento: {info}")
+
             st.progress(min(100, int((processed / max(1, total_leads)) * 100)) if total_leads else 0)
             st.caption(f"Progresso: {_progress_label(processed, total_leads)}")
 
@@ -591,6 +604,18 @@ def _render_mission_control() -> None:
                 "PAUSED": 2,
             }
             current_index = stage_groups.get(current_stage, 0)
+            stage_messages = {
+                "PROBE": "Estimando volume na base...",
+                "REALTIME_FETCH": "Coletando resultados em tempo real...",
+                "BULK_EXPORT_REQUEST": "Solicitando exportacao bulk...",
+                "BULK_POLL": "Aguardando processamento do export...",
+                "BULK_DOWNLOAD": "Baixando CSV seguro...",
+                "BULK_IMPORT": "Importando CSV...",
+                "LOCAL_PIPELINE": "Limpeza, enriquecimento e scoring...",
+                "COMPLETED": "Concluido. Resultados no Vault.",
+                "FAILED": "Falha no processamento. Verifique os logs.",
+                "PAUSED": "Job pausado pelo usuario.",
+            }
             steps = [
                 ("🟡", "Probe & Negotiation", "Negociando arquivo com a Receita..."),
                 ("🔵", "Extraction", "Baixando CSV Seguro..."),
@@ -604,6 +629,7 @@ def _render_mission_control() -> None:
                     state = "done"
                 elif idx == current_index:
                     state = "active"
+                    caption = stage_messages.get(current_stage, caption)
                 timeline_html.append(
                     f"<div class='timeline-item {state}'>"
                     f"<div>{icon}</div><div><strong>{title}</strong><br><span>{caption}</span></div></div>"

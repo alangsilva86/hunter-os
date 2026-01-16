@@ -607,6 +607,24 @@ def search_v5(
     return items, telemetry
 
 
+def fetch_cnpjs_v5(
+    cnpjs: List[str],
+    run_id: Optional[str] = None,
+    tipo_resultado: str = "completo",
+) -> Tuple[List[Dict[str, Any]], Dict[str, Any]]:
+    if not cnpjs:
+        return [], {}
+    limit = min(len(cnpjs), 1000)
+    payload = {"cnpj": cnpjs[:limit], "pagina": 1, "limite": limit}
+    return search_v5(
+        payload=payload,
+        limit=limit,
+        page_size=limit,
+        run_id=run_id,
+        tipo_resultado=tipo_resultado,
+    )
+
+
 def export_create_v5(
     payload: Dict[str, Any],
     run_id: Optional[str] = None,
