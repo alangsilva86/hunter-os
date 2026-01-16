@@ -3,6 +3,7 @@ SQLite storage layer for Hunter OS.
 """
 
 import json
+import logging
 import os
 import sqlite3
 from contextlib import contextmanager
@@ -11,6 +12,8 @@ from typing import Any, Dict, Iterable, List, Optional, Tuple
 from uuid import uuid4
 
 DEFAULT_DB_PATH = os.getenv("HUNTER_DB_PATH", "hunter.db")
+_SCHEMA_READY = False
+logger = logging.getLogger("hunter")
 
 
 def _utcnow() -> str:
@@ -19,6 +22,14 @@ def _utcnow() -> str:
 
 def get_db_path() -> str:
     return os.getenv("HUNTER_DB_PATH", DEFAULT_DB_PATH)
+
+
+def _ensure_schema() -> None:
+    global _SCHEMA_READY
+    if _SCHEMA_READY:
+        return
+    init_db()
+    _SCHEMA_READY = True
 
 def _table_exists(conn: sqlite3.Connection, name: str) -> bool:
     row = conn.execute(
@@ -41,6 +52,7 @@ def get_conn():
     try:
         conn.execute("PRAGMA journal_mode=WAL")
         conn.execute("PRAGMA synchronous=NORMAL")
+        conn.execute("PRAGMA busy_timeout=5000")
         yield conn
         conn.commit()
     finally:
@@ -453,6 +465,8 @@ def init_db() -> None:
                     FROM enrichment_runs
                     """
                 )
+    global _SCHEMA_READY
+    _SCHEMA_READY = True
 
 
 def log_event(level: str, event: str, detail: Optional[Dict[str, Any]] = None) -> None:
@@ -676,6 +690,7 @@ def list_leads_raw_sources_between(start_ts: str, end_ts: str) -> List[Dict[str,
 def upsert_socios_from_leads(leads: List[Dict[str, Any]]) -> None:
     if not leads:
         return
+    _ensure_schema()
     rows: List[Tuple[Any, ...]] = []
     cnpjs: set = set()
 
@@ -738,6 +753,7 @@ def upsert_socios_from_leads(leads: List[Dict[str, Any]]) -> None:
 def upsert_leads_clean(leads: List[Dict[str, Any]]) -> None:
     if not leads:
         return
+    _ensure_schema()
     rows = []
     for lead in leads:
         socios = lead.get("socios")
@@ -803,92 +819,97 @@ def upsert_leads_clean(leads: List[Dict[str, Any]]) -> None:
 
 
 def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
+    _ensure_schema()
     with get_conn() as conn:
-        conn.execute(
-            """
-            INSERT INTO enrichments (
-                cnpj, run_id, site, instagram, linkedin_company,
-                linkedin_people_json, google_maps_url, has_contact_page,
-                has_form, tech_stack_json, tech_score, tech_confidence,
-                has_marketing, has_analytics, has_ecommerce, has_chat,
-                signals_json, fetched_url, fetch_status, fetch_ms,
-                rendered_used, contact_quality, notes, enriched_at,
-                website_confidence, discovery_method, search_term_used,
-                candidates_considered, website_match_reasons, excluded_candidates_count,
-                golden_techs_found, tech_sources, score_version, score_reasons
-            ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(cnpj) DO UPDATE SET
-                run_id=excluded.run_id,
-                site=excluded.site,
-                instagram=excluded.instagram,
-                linkedin_company=excluded.linkedin_company,
-                linkedin_people_json=excluded.linkedin_people_json,
-                google_maps_url=excluded.google_maps_url,
-                has_contact_page=excluded.has_contact_page,
-                has_form=excluded.has_form,
-                tech_stack_json=excluded.tech_stack_json,
-                tech_score=excluded.tech_score,
-                tech_confidence=excluded.tech_confidence,
-                has_marketing=excluded.has_marketing,
-                has_analytics=excluded.has_analytics,
-                has_ecommerce=excluded.has_ecommerce,
-                has_chat=excluded.has_chat,
-                signals_json=excluded.signals_json,
-                fetched_url=excluded.fetched_url,
-                fetch_status=excluded.fetch_status,
-                fetch_ms=excluded.fetch_ms,
-                rendered_used=excluded.rendered_used,
-                contact_quality=excluded.contact_quality,
-                notes=excluded.notes,
-                enriched_at=excluded.enriched_at,
-                website_confidence=excluded.website_confidence,
-                discovery_method=excluded.discovery_method,
-                search_term_used=excluded.search_term_used,
-                candidates_considered=excluded.candidates_considered,
-                website_match_reasons=excluded.website_match_reasons,
-                excluded_candidates_count=excluded.excluded_candidates_count,
-                golden_techs_found=excluded.golden_techs_found,
-                tech_sources=excluded.tech_sources,
-                score_version=excluded.score_version,
-                score_reasons=excluded.score_reasons
-            """,
-            (
-                cnpj,
-                data.get("run_id"),
-                data.get("site"),
-                data.get("instagram"),
-                data.get("linkedin_company"),
-                json.dumps(data.get("linkedin_people", []), ensure_ascii=False),
-                data.get("google_maps_url"),
-                int(bool(data.get("has_contact_page"))),
-                int(bool(data.get("has_form"))),
-                json.dumps(data.get("tech_stack", {}), ensure_ascii=False),
-                data.get("tech_score"),
-                data.get("tech_confidence"),
-                int(bool(data.get("has_marketing"))),
-                int(bool(data.get("has_analytics"))),
-                int(bool(data.get("has_ecommerce"))),
-                int(bool(data.get("has_chat"))),
-                json.dumps(data.get("signals", {}), ensure_ascii=False),
-                data.get("fetched_url"),
-                data.get("fetch_status"),
-                data.get("fetch_ms"),
-                int(bool(data.get("rendered_used"))),
-                data.get("contact_quality"),
-                data.get("notes"),
-                data.get("enriched_at") or _utcnow(),
-                data.get("website_confidence"),
-                data.get("discovery_method"),
-                data.get("search_term_used"),
-                data.get("candidates_considered"),
-                json.dumps(data.get("website_match_reasons", []), ensure_ascii=False),
-                data.get("excluded_candidates_count"),
-                json.dumps(data.get("golden_techs_found", []), ensure_ascii=False),
-                json.dumps(data.get("tech_sources", {}), ensure_ascii=False),
-                data.get("score_version"),
-                json.dumps(data.get("score_reasons", []), ensure_ascii=False),
-            ),
-        )
+        try:
+            conn.execute(
+                """
+                INSERT INTO enrichments (
+                    cnpj, run_id, site, instagram, linkedin_company,
+                    linkedin_people_json, google_maps_url, has_contact_page,
+                    has_form, tech_stack_json, tech_score, tech_confidence,
+                    has_marketing, has_analytics, has_ecommerce, has_chat,
+                    signals_json, fetched_url, fetch_status, fetch_ms,
+                    rendered_used, contact_quality, notes, enriched_at,
+                    website_confidence, discovery_method, search_term_used,
+                    candidates_considered, website_match_reasons, excluded_candidates_count,
+                    golden_techs_found, tech_sources, score_version, score_reasons
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                ON CONFLICT(cnpj) DO UPDATE SET
+                    run_id=excluded.run_id,
+                    site=excluded.site,
+                    instagram=excluded.instagram,
+                    linkedin_company=excluded.linkedin_company,
+                    linkedin_people_json=excluded.linkedin_people_json,
+                    google_maps_url=excluded.google_maps_url,
+                    has_contact_page=excluded.has_contact_page,
+                    has_form=excluded.has_form,
+                    tech_stack_json=excluded.tech_stack_json,
+                    tech_score=excluded.tech_score,
+                    tech_confidence=excluded.tech_confidence,
+                    has_marketing=excluded.has_marketing,
+                    has_analytics=excluded.has_analytics,
+                    has_ecommerce=excluded.has_ecommerce,
+                    has_chat=excluded.has_chat,
+                    signals_json=excluded.signals_json,
+                    fetched_url=excluded.fetched_url,
+                    fetch_status=excluded.fetch_status,
+                    fetch_ms=excluded.fetch_ms,
+                    rendered_used=excluded.rendered_used,
+                    contact_quality=excluded.contact_quality,
+                    notes=excluded.notes,
+                    enriched_at=excluded.enriched_at,
+                    website_confidence=excluded.website_confidence,
+                    discovery_method=excluded.discovery_method,
+                    search_term_used=excluded.search_term_used,
+                    candidates_considered=excluded.candidates_considered,
+                    website_match_reasons=excluded.website_match_reasons,
+                    excluded_candidates_count=excluded.excluded_candidates_count,
+                    golden_techs_found=excluded.golden_techs_found,
+                    tech_sources=excluded.tech_sources,
+                    score_version=excluded.score_version,
+                    score_reasons=excluded.score_reasons
+                """,
+                (
+                    cnpj,
+                    data.get("run_id"),
+                    data.get("site"),
+                    data.get("instagram"),
+                    data.get("linkedin_company"),
+                    json.dumps(data.get("linkedin_people", []), ensure_ascii=False),
+                    data.get("google_maps_url"),
+                    int(bool(data.get("has_contact_page"))),
+                    int(bool(data.get("has_form"))),
+                    json.dumps(data.get("tech_stack", {}), ensure_ascii=False),
+                    data.get("tech_score"),
+                    data.get("tech_confidence"),
+                    int(bool(data.get("has_marketing"))),
+                    int(bool(data.get("has_analytics"))),
+                    int(bool(data.get("has_ecommerce"))),
+                    int(bool(data.get("has_chat"))),
+                    json.dumps(data.get("signals", {}), ensure_ascii=False),
+                    data.get("fetched_url"),
+                    data.get("fetch_status"),
+                    data.get("fetch_ms"),
+                    int(bool(data.get("rendered_used"))),
+                    data.get("contact_quality"),
+                    data.get("notes"),
+                    data.get("enriched_at") or _utcnow(),
+                    data.get("website_confidence"),
+                    data.get("discovery_method"),
+                    data.get("search_term_used"),
+                    data.get("candidates_considered"),
+                    json.dumps(data.get("website_match_reasons", []), ensure_ascii=False),
+                    data.get("excluded_candidates_count"),
+                    json.dumps(data.get("golden_techs_found", []), ensure_ascii=False),
+                    json.dumps(data.get("tech_sources", {}), ensure_ascii=False),
+                    data.get("score_version"),
+                    json.dumps(data.get("score_reasons", []), ensure_ascii=False),
+                ),
+            )
+        except sqlite3.OperationalError as exc:
+            logger.exception("upsert_enrichment failed (cnpj=%s): %s", cnpj, exc)
+            raise
 
 
 def create_run(params: Dict[str, Any]) -> str:
