@@ -231,43 +231,75 @@ class PersonIntelligence:
         if not self.evolution_base_url or not phone_e164:
             return None
 
+        # 1. Configuration & Setup
+        instance_name = os.getenv("WA_INSTANCE_NAME", "91acessus")
         phone_key = phone_e164.replace("+", "")
+
+        # Cache check
         file_name = hashlib.sha256(phone_key.encode("utf-8")).hexdigest()[:16] + ".jpg"
         cached_path = os.path.join(self.avatar_cache_dir, file_name)
         if os.path.exists(cached_path):
             return cached_path
 
-        headers = {}
-        if self.evolution_api_key:
-            headers["Authorization"] = f"Bearer {self.evolution_api_key}"
-            headers["apikey"] = self.evolution_api_key
+        # 2. Auth Headers (Robust for Render/Gateway)
+        headers = {
+            "Content-Type": "application/json",
+            "apikey": self.evolution_api_key,
+            "x-api-key": self.evolution_api_key,
+            "Authorization": f"Bearer {self.evolution_api_key}",
+        }
 
-        base = self.evolution_base_url
-        check_payload = {"number": phone_e164}
-        check = await _fetch_json(session, f"{base}/check-number", check_payload, headers)
-        exists = (
-            check.get("exists")
-            or check.get("valid")
-            or (check.get("result") or {}).get("exists")
-            or (check.get("result") or {}).get("valid")
-        )
-        if exists is False:
+        # 3. Construct Instance URL
+        # Logic: Handle if user put full path in .env or just base
+        base_url = self.evolution_base_url.rstrip("/")
+        if "/instances" not in base_url:
+            base_instance_url = f"{base_url}/instances/{instance_name}"
+        else:
+            base_instance_url = base_url
+
+        try:
+            # 4. Check Number Existence
+            # Custom API usually expects GET with query params
+            check_url = f"{base_instance_url}/check-number"
+            async with session.get(check_url, params={"number": phone_key}, headers=headers) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    exists = (
+                        data.get("exists")
+                        or data.get("valid")
+                        or (data.get("result") or {}).get("exists")
+                    )
+                    if not exists:
+                        return None
+                else:
+                    # Silent fail if endpoint unreachable
+                    return None
+
+            # 5. Fetch Profile Picture URL
+            pic_url_endpoint = f"{base_instance_url}/profile-pic"
+            remote_url = None
+
+            async with session.get(pic_url_endpoint, params={"number": phone_key}, headers=headers) as resp_pic:
+                if resp_pic.status == 200:
+                    pic_data = await resp_pic.json()
+                    remote_url = (
+                        pic_data.get("profilePicUrl")
+                        or pic_data.get("url")
+                        or pic_data.get("imgUrl")
+                    )
+
+            if not remote_url:
+                return None
+
+            # 6. Download Binary Image
+            if await _download_avatar(session, remote_url, cached_path, headers):
+                return cached_path
+
+        except Exception as e:
+            logger.warning(f"Avatar fetch failed for {phone_e164} on instance {instance_name}: {e}")
             return None
 
-        pic_payload = {"number": phone_e164}
-        pic_data = await _fetch_json(session, f"{base}/profile-pic", pic_payload, headers)
-        url = (
-            pic_data.get("profilePicUrl")
-            or pic_data.get("profile_pic")
-            or pic_data.get("profilePic")
-            or pic_data.get("url")
-        )
-        if not url:
-            return None
-
-        if await _download_avatar(session, url, cached_path, headers):
-            return cached_path
-        return url
+        return None
 
     def _select_phone(self, lead: Dict[str, Any]) -> str:
         phones = lead.get("telefones_norm") or []
