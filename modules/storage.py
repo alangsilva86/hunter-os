@@ -1217,6 +1217,7 @@ def _build_vault_filters(
     params: List[Any] = []
     min_score = filters.get("min_score")
     min_tech_score = filters.get("min_tech_score")
+    min_wealth = filters.get("min_wealth")
     contact_quality = filters.get("contact_quality")
     municipio = filters.get("municipio")
     uf = filters.get("uf")
@@ -1228,6 +1229,9 @@ def _build_vault_filters(
     if min_tech_score is not None:
         clauses.append("e.tech_score >= ?")
         params.append(min_tech_score)
+    if min_wealth is not None:
+        clauses.append("e.wealth_score >= ?")
+        params.append(min_wealth)
     if contact_quality:
         clauses.append("lc.contact_quality = ?")
         params.append(contact_quality)
@@ -1276,7 +1280,11 @@ def get_vault_data(
     status_filter: str = "all",
 ) -> List[Dict[str, Any]]:
     where_sql, params = _build_vault_filters(filters, status_filter)
-    order_sql = "ORDER BY (e.enriched_at IS NULL) ASC, e.enriched_at DESC, lc.score_v2 DESC"
+    order_sql = (
+        "ORDER BY (e.enriched_at IS NULL) ASC, "
+        "COALESCE(e.wealth_score, 0) DESC, "
+        "e.enriched_at DESC, lc.score_v2 DESC"
+    )
     offset = max(0, (page - 1) * page_size)
     sql = f"{_vault_select_sql()} {where_sql} {order_sql} LIMIT ? OFFSET ?"
     params.extend([page_size, offset])
@@ -1288,6 +1296,7 @@ def get_vault_data(
 def query_enrichment_vault(
     min_score: Optional[int] = None,
     min_tech_score: Optional[int] = None,
+    min_wealth: Optional[float] = None,
     contact_quality: Optional[str] = None,
     municipio: Optional[str] = None,
     has_marketing: Optional[bool] = None,
@@ -1298,12 +1307,17 @@ def query_enrichment_vault(
     filters = {
         "min_score": min_score,
         "min_tech_score": min_tech_score,
+        "min_wealth": min_wealth,
         "contact_quality": contact_quality,
         "municipio": municipio,
         "has_marketing": has_marketing,
     }
     where_sql, params = _build_vault_filters(filters, status_filter)
-    order_sql = "ORDER BY (e.enriched_at IS NULL) ASC, e.enriched_at DESC, lc.score_v2 DESC"
+    order_sql = (
+        "ORDER BY (e.enriched_at IS NULL) ASC, "
+        "COALESCE(e.wealth_score, 0) DESC, "
+        "e.enriched_at DESC, lc.score_v2 DESC"
+    )
     sql = f"{_vault_select_sql()} {where_sql} {order_sql} LIMIT ? OFFSET ?"
     params.extend([limit, offset])
     with get_conn() as conn:
@@ -1314,6 +1328,7 @@ def query_enrichment_vault(
 def count_enrichment_vault(
     min_score: Optional[int] = None,
     min_tech_score: Optional[int] = None,
+    min_wealth: Optional[float] = None,
     contact_quality: Optional[str] = None,
     municipio: Optional[str] = None,
     has_marketing: Optional[bool] = None,
@@ -1322,6 +1337,7 @@ def count_enrichment_vault(
     filters = {
         "min_score": min_score,
         "min_tech_score": min_tech_score,
+        "min_wealth": min_wealth,
         "contact_quality": contact_quality,
         "municipio": municipio,
         "has_marketing": has_marketing,

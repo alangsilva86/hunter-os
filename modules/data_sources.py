@@ -47,6 +47,23 @@ SETORES_CNAE = {
     "Industria": ["1011201", "1012101", "2211100", "2511000"],
 }
 
+CNAE_SUGGESTIONS = [
+    {"code": "6201501", "desc": "Desenvolvimento de programas de computador sob encomenda"},
+    {"code": "6201502", "desc": "Desenvolvimento de programas de computador customizaveis"},
+    {"code": "6202300", "desc": "Desenvolvimento e licenciamento de programas de computador customizaveis"},
+    {"code": "6203100", "desc": "Desenvolvimento e licenciamento de programas de computador nao customizaveis"},
+    {"code": "6311900", "desc": "Tratamento de dados, provedores de servicos de aplicacao e hospedagem"},
+    {"code": "5821200", "desc": "Edicao integrada a impressao de livros"},
+    {"code": "7020400", "desc": "Atividades de consultoria em gestao empresarial"},
+    {"code": "7319002", "desc": "Promocao de vendas"},
+    {"code": "8211300", "desc": "Servicos combinados de escritorio e apoio administrativo"},
+    {"code": "8291100", "desc": "Atividades de cobranca e informacoes cadastrais"},
+    {"code": "5611201", "desc": "Restaurantes e similares"},
+    {"code": "4711302", "desc": "Comercio varejista de mercadorias em geral, com predominancia de alimentos"},
+]
+
+_CNAE_SUGGESTIONS_MAP = {item["code"]: item["desc"] for item in CNAE_SUGGESTIONS}
+
 CIDADES_DISPONIVEIS = [
     "MARINGA",
     "SARANDI",
@@ -64,6 +81,41 @@ CIDADES_DISPONIVEIS = [
     "BRASILIA",
     "SALVADOR",
 ]
+
+
+def format_cnae_label(code: str) -> str:
+    digits = re.sub(r"\D", "", str(code or ""))
+    if len(digits) == 7:
+        display = f"{digits[:4]}-{digits[4]}/{digits[5:]}"
+    elif len(digits) == 6:
+        display = f"{digits[:4]}-{digits[4:]}"
+    else:
+        display = digits or str(code or "")
+    desc = _CNAE_SUGGESTIONS_MAP.get(digits) or _CNAE_SUGGESTIONS_MAP.get(str(code)) or ""
+    if desc:
+        return f"{display} - {desc}"
+    return display
+
+
+def list_cnae_suggestions() -> List[Dict[str, str]]:
+    return list(CNAE_SUGGESTIONS)
+
+
+def search_cnae_suggestions(query: str, limit: int = 8) -> List[Dict[str, str]]:
+    if not query:
+        return CNAE_SUGGESTIONS[:limit]
+    needle = str(query).strip().lower()
+    if not needle:
+        return CNAE_SUGGESTIONS[:limit]
+    results: List[Dict[str, str]] = []
+    for item in CNAE_SUGGESTIONS:
+        code = item.get("code", "")
+        desc = item.get("desc", "")
+        if needle in code or needle in desc.lower():
+            results.append(item)
+        if len(results) >= limit:
+            break
+    return results
 
 class CasaDosDadosBalanceError(RuntimeError):
     pass

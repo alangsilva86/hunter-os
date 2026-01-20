@@ -1,6 +1,7 @@
 """Hunter OS v3 - Sniper Elite Console."""
 
 import asyncio
+import hashlib
 import html
 import json
 import logging
@@ -27,7 +28,7 @@ from modules import data_sources, enrichment_async, exports as webhook_exports, 
 
 
 st.set_page_config(
-    page_title="Hunter OS v3 - Sniper Elite",
+    page_title="Hunter OS v4 - Decision Maker Intel",
     page_icon="🎯",
     layout="wide",
     initial_sidebar_state="collapsed",
@@ -108,6 +109,29 @@ def _micro_label(text: str) -> None:
     st.markdown(f"<div class='micro-label'>{text}</div>", unsafe_allow_html=True)
 
 
+def _estimate_cache_key(filters: Dict[str, Any]) -> str:
+    payload = json.dumps(filters, sort_keys=True, ensure_ascii=False)
+    return f"estimate:{hashlib.sha256(payload.encode('utf-8')).hexdigest()}"
+
+
+def _estimate_targets(filters: Dict[str, Any]) -> Dict[str, Any]:
+    cache_key = _estimate_cache_key(filters)
+    cached = storage.cache_get(cache_key)
+    if cached and isinstance(cached, dict) and "total" in cached:
+        return cached
+    if not _env("CASA_DOS_DADOS_API_KEY"):
+        return {"total": None, "error": "missing_key"}
+    try:
+        total = orchestrator.probe_total(filters, run_id="preview")
+    except data_sources.CasaDosDadosBalanceError:
+        return {"total": None, "error": "saldo"}
+    except Exception:
+        return {"total": None, "error": "failed"}
+    payload = {"total": total, "updated_at": datetime.now(timezone.utc).isoformat()}
+    storage.cache_set(cache_key, payload, ttl_hours=1)
+    return payload
+
+
 def _flatten_cnaes(setores: List[str], manual: str) -> List[str]:
     cnaes: List[str] = []
     for setor in setores:
@@ -167,6 +191,15 @@ def _wealth_label(person_raw: Any) -> str:
     if label == "C":
         return "⬜ C"
     return ""
+
+
+def _format_currency(value: Any) -> str:
+    try:
+        amount = float(value or 0)
+    except (TypeError, ValueError):
+        amount = 0
+    formatted = f"{amount:,.0f}".replace(",", ".")
+    return f"R$ {formatted}"
 
 
 def _fetch_all_vault_rows(
@@ -453,6 +486,48 @@ def _inject_css() -> None:
             max-height: 360px;
             overflow: auto;
         }
+        .terminal-line {
+            display: block;
+            color: #86efac;
+        }
+        .estimate-card {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 1rem;
+            padding: 0.85rem 1rem;
+            border-radius: 14px;
+            border: 1px solid rgba(248, 250, 252, 0.08);
+            background: rgba(24, 24, 27, 0.6);
+            box-shadow: 0 8px 30px rgba(0, 0, 0, 0.25);
+        }
+        .estimate-card strong {
+            color: var(--text-primary);
+            font-size: 1.1rem;
+        }
+        .estimate-card span {
+            color: var(--text-secondary);
+            font-size: 0.85rem;
+        }
+        .pulse {
+            animation: pulse 1.4s ease-in-out infinite;
+        }
+        .chip {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.4rem;
+            padding: 0.35rem 0.6rem;
+            border-radius: 999px;
+            background: rgba(63, 63, 70, 0.6);
+            color: var(--text-secondary);
+            font-size: 0.75rem;
+            border: 1px solid rgba(63, 63, 70, 0.6);
+        }
+        @keyframes pulse {
+            0% { box-shadow: 0 0 0 0 rgba(249, 115, 22, 0.25); }
+            70% { box-shadow: 0 0 0 12px rgba(249, 115, 22, 0); }
+            100% { box-shadow: 0 0 0 0 rgba(249, 115, 22, 0); }
+        }
         </style>
         """,
         unsafe_allow_html=True,
@@ -463,8 +538,8 @@ def _render_header() -> None:
     st.markdown(
         """
         <div class="app-header">
-            <div class="app-title">HUNTER OS v3 • SNIPER ELITE</div>
-            <div class="app-subtitle">Console de Inteligencia B2B — foco total em precisao e eficiencia.</div>
+            <div class="app-title">HUNTER OS v4 • DECISION MAKER INTEL</div>
+            <div class="app-subtitle">Revenue Intelligence com foco total no decisor e na conversao.</div>
         </div>
         """,
         unsafe_allow_html=True,
@@ -513,6 +588,14 @@ def _render_mission_control() -> None:
         with st.container(border=True):
             st.caption("Setor & CNAE")
             setores = st.multiselect("Setores", data_sources.get_setores_disponiveis(), default=["Servicos Administrativos"])
+            atividade_query = st.text_input("Atividade (autocomplete)", placeholder="Ex: Software, VTEX, Logistica")
+            sugestoes = data_sources.search_cnae_suggestions(atividade_query)
+            sugestoes_codes = [item.get("code") for item in sugestoes if item.get("code")]
+            cnaes_sugeridos = st.multiselect(
+                "Sugestoes CNAE",
+                options=sugestoes_codes,
+                format_func=data_sources.format_cnae_label,
+            )
             col_cnae_long, col_cnae_short = st.columns([3, 1], gap="medium")
             with col_cnae_long:
                 cnaes_manual = st.text_area("CNAE manual (opcional)", height=70)
@@ -533,12 +616,66 @@ def _render_mission_control() -> None:
             enrich_top_pct = st.slider("Top % para enriquecer", min_value=5, max_value=100, value=25, step=5)
             cache_ttl_hours = st.number_input("Cache TTL (horas)", min_value=1, max_value=168, value=int(_env("CACHE_TTL_HOURS", "24")))
 
-    cnaes = _flatten_cnaes(setores, cnaes_manual)
+    cnaes = list(dict.fromkeys(_flatten_cnaes(setores, cnaes_manual) + cnaes_sugeridos))
     provider = _env("SEARCH_PROVIDER", "serper")
+
+    estimate_filters = {
+        "uf": uf,
+        "municipios": municipios,
+        "cnaes": cnaes,
+        "excluir_mei": excluir_mei,
+        "com_telefone": com_telefone,
+        "com_email": com_email,
+    }
+    estimate_key = _estimate_cache_key(estimate_filters)
+    if st.session_state.get("estimate_key") != estimate_key:
+        st.session_state["estimate_key"] = estimate_key
+        st.session_state["estimate_payload"] = storage.cache_get(estimate_key) or {}
+
+    estimate_payload = st.session_state.get("estimate_payload") or {}
+    col_est_left, col_est_right = st.columns([3, 1])
+    with col_est_right:
+        if st.button("Atualizar estimativa", key="estimate_refresh", use_container_width=True):
+            with st.spinner("Estimando volume..."):
+                estimate_payload = _estimate_targets(estimate_filters)
+                st.session_state["estimate_payload"] = estimate_payload
+    total_est = estimate_payload.get("total") if isinstance(estimate_payload, dict) else None
+    status_hint = ""
+    if isinstance(estimate_payload, dict):
+        if estimate_payload.get("error") == "missing_key":
+            status_hint = "Configure a API key para estimar."
+        elif estimate_payload.get("error") == "saldo":
+            status_hint = "Saldo insuficiente na Casa dos Dados."
+        elif estimate_payload.get("error") == "failed":
+            status_hint = "Falha ao estimar. Tente novamente."
+    total_label = f"{int(total_est):,}".replace(",", ".") if isinstance(total_est, (int, float)) else "--"
+    with col_est_left:
+        st.markdown(
+            f"""
+            <div class="estimate-card pulse">
+                <div>
+                    <span>Estimativa de Alvos</span><br/>
+                    <strong>{total_label} empresas</strong>
+                </div>
+                <div><span>{status_hint}</span></div>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    chips = [
+        f"UF {uf}" if uf else "",
+        f"{len(municipios)} municipios" if municipios else "",
+        f"{len(cnaes)} CNAEs" if cnaes else "Sem CNAE",
+        "Com telefone" if com_telefone else "",
+        "Com email" if com_email else "",
+    ]
+    chips = [chip for chip in chips if chip]
+    if chips:
+        st.markdown(" ".join([f"<span class='chip'>{chip}</span>" for chip in chips]), unsafe_allow_html=True)
 
     col_left, col_center, col_right = st.columns([1, 2, 1])
     with col_center:
-        if st.button("INICIAR CAÇADA AGORA", type="primary", key="start_hunt", use_container_width=True):
+        if st.button("INICIAR CAÇADA", type="primary", key="start_hunt", use_container_width=True):
             try:
                 filters = {
                     "uf": uf,
@@ -564,7 +701,7 @@ def _render_mission_control() -> None:
                 st.error("O provedor de dados esta instavel. Tente novamente em instantes.")
                 logger.warning("start_hunt failed: %s", exc)
 
-    _micro_label("LIVE MONITOR")
+    _micro_label("LIVE TERMINAL")
     run_id = st.session_state.get("current_hunter_run_id")
     if not run_id:
         st.info("Nenhuma caçada ativa. Configure o alvo acima e dispare a missao.")
@@ -666,6 +803,27 @@ def _render_mission_control() -> None:
                         orchestrator.resume_job(active_run_id)
                         st.toast("Retomando caçada.")
 
+            terminal_logs = storage.fetch_logs(limit=8, run_id=active_run_id)
+            event_map = {
+                "v3_probe": "🔍 Localizando CNPJs...",
+                "cleaning_start": "🧹 Limpando base e deduplicando...",
+                "enrichment_start": "👤 Identificando Socios decisores...",
+                "enrichment_summary": "✅ Enriquecimento concluido.",
+                "v3_stage": "⚙️ Pipeline em andamento...",
+                "v3_completed": "🎉 Processamento finalizado.",
+                "enrichment_provider_error": "⚠️ Erro no provedor externo.",
+                "v3_failed": "🚨 Falha no processamento.",
+            }
+            if terminal_logs:
+                terminal_lines = []
+                for log in terminal_logs[::-1]:
+                    detail = _parse_json(log.get("detail_json") or "{}")
+                    message = detail.get("message") or event_map.get(log.get("event")) or log.get("event") or ""
+                    line = f"{log.get('created_at')} | {message}"
+                    terminal_lines.append(f"<span class='terminal-line'>{_escape(line)}</span>")
+                terminal_html = "<div class='terminal'>" + "".join(terminal_lines) + "</div>"
+                st.markdown(terminal_html, unsafe_allow_html=True)
+
             with st.expander("Logs vivos (ultimas 10 linhas)"):
                 logs = storage.fetch_logs(limit=10, run_id=active_run_id)
                 if logs:
@@ -720,6 +878,7 @@ def _render_vault() -> None:
             kwargs = {
                 "min_score": filters.get("min_score"),
                 "min_tech_score": filters.get("min_tech_score"),
+                "min_wealth": filters.get("min_wealth"),
                 "contact_quality": filters.get("contact_quality"),
                 "municipio": filters.get("municipio"),
             }
@@ -744,6 +903,7 @@ def _render_vault() -> None:
             kwargs = {
                 "min_score": filters.get("min_score"),
                 "min_tech_score": filters.get("min_tech_score"),
+                "min_wealth": filters.get("min_wealth"),
                 "contact_quality": filters.get("contact_quality"),
                 "municipio": filters.get("municipio"),
                 "limit": page_size,
@@ -762,6 +922,14 @@ def _render_vault() -> None:
             min_score = st.number_input("Score minimo", min_value=0, max_value=100, value=0)
         with col_f2:
             min_tech_score = st.number_input("Tech score minimo", min_value=0, max_value=30, value=0)
+        col_w1, col_w2 = st.columns(2, gap="medium")
+        with col_w1:
+            wealth_preset = st.selectbox(
+                "Wealth preset",
+                options=["", "Classe A (>= R$ 1M)", "Classe B (>= R$ 100k)"],
+            )
+        with col_w2:
+            min_wealth = st.number_input("Wealth minimo (R$)", min_value=0, max_value=100000000, value=0, step=50000)
         col_f3, col_f4 = st.columns([3, 1], gap="medium")
         with col_f3:
             municipio = st.text_input("Municipio")
@@ -777,12 +945,19 @@ def _render_vault() -> None:
             )
         filter_min_score = min_score if min_score > 0 else None
         filter_min_tech = min_tech_score if min_tech_score > 0 else None
+        preset_min_wealth = 0
+        if wealth_preset == "Classe A (>= R$ 1M)":
+            preset_min_wealth = 1_000_000
+        elif wealth_preset == "Classe B (>= R$ 100k)":
+            preset_min_wealth = 100_000
+        applied_min_wealth = max(min_wealth, preset_min_wealth)
         filter_contact = contact_quality or None
         filter_municipio = municipio or None
 
         filters = {
             "min_score": filter_min_score,
             "min_tech_score": filter_min_tech,
+            "min_wealth": applied_min_wealth if applied_min_wealth > 0 else None,
             "contact_quality": filter_contact,
             "municipio": filter_municipio,
         }
@@ -971,6 +1146,70 @@ def _render_vault() -> None:
     selected_idx = edited.index[edited["selecionar"]].tolist()
     selected_payload = df_vault.loc[selected_idx].to_dict(orient="records") if selected_idx else []
 
+    _micro_label("INSPECTOR")
+    with st.container(border=True):
+        if not selected_payload:
+            st.caption("Selecione um lead no Vault para abrir o Drawer de inteligencia.")
+        else:
+            lead = selected_payload[0]
+            person = _parse_json(lead.get("person_json"))
+            primary = _person_primary(person)
+            cross = person.get("cross_ownership") if isinstance(person, dict) else []
+            tech_stack = _parse_json(lead.get("tech_stack_json"))
+            stack_items = []
+            if isinstance(tech_stack, dict):
+                stack_items = tech_stack.get("detected_stack") or []
+            elif isinstance(tech_stack, list):
+                stack_items = tech_stack
+
+            avatar_url = primary.get("avatar_url") or lead.get("avatar_url")
+            name = primary.get("name") or lead.get("razao_social") or lead.get("nome_fantasia") or ""
+            role = primary.get("role") or "Socio"
+            linkedin_profile = primary.get("linkedin_profile") or ""
+            if not linkedin_profile:
+                linkedin_people = _parse_json_list(lead.get("linkedin_people_json"))
+                linkedin_profile = str(linkedin_people[0]) if linkedin_people else ""
+            wealth_estimate = primary.get("wealth_estimate") or lead.get("wealth_score") or 0
+            share_pct = primary.get("share_pct") or 0
+            email = primary.get("email") or ""
+            email_validated = bool(primary.get("email_validated"))
+            email_sources = primary.get("email_sources") or []
+
+            col_i1, col_i2 = st.columns([1, 2], gap="medium")
+            with col_i1:
+                if avatar_url:
+                    st.image(avatar_url, width=120)
+                st.caption("Wealth Score")
+                st.metric("Patrimonio estimado", _format_currency(wealth_estimate))
+                st.progress(min(100, int(float(share_pct or 0))))
+                st.caption(f"Participacao societaria: {float(share_pct or 0):.1f}%")
+            with col_i2:
+                st.markdown(f"**{name}** · {role}")
+                if linkedin_profile:
+                    st.markdown(f"[LinkedIn pessoal]({linkedin_profile})")
+                if email:
+                    if email_validated and email_sources:
+                        sources = ", ".join([str(item) for item in email_sources])
+                        st.markdown(f"Email: `{email}` • Validado via Holehe ({sources})")
+                    elif email_validated:
+                        st.markdown(f"Email: `{email}` • Validado via Holehe")
+                    else:
+                        st.markdown(f"Email: `{email}`")
+                phones = _parse_json_list(lead.get("telefones_norm"))
+                if phones:
+                    phone = str(phones[0])
+                    wa = f"https://wa.me/55{phone}" if not phone.startswith("55") else f"https://wa.me/{phone}"
+                    st.markdown(f"[WhatsApp direto]({wa})")
+                if stack_items:
+                    st.caption("Tech Stack")
+                    st.write(", ".join(stack_items[:10]))
+                if cross:
+                    st.caption("Cross-Ownership")
+                    for item in cross[:5]:
+                        line = item.get("razao_social") or item.get("nome_fantasia") or item.get("cnpj")
+                        if line:
+                            st.write(f"• {line}")
+
     _micro_label("ACTIONS")
     with st.container(border=True):
         col_a, col_b = st.columns([2, 3], gap="medium")
@@ -1009,22 +1248,32 @@ def _render_vault() -> None:
             csv_data = export_df.to_csv(index=False)
             meta_df = webhook_exports.export_to_meta_ads(pd.DataFrame(export_rows), socios_map=socios_map)
             meta_csv = meta_df.to_csv(index=False)
-            st.download_button(
+            export_name = f"hunter_vault_{export_suffix}.csv"
+            if st.download_button(
                 "Exportar CSV",
                 data=csv_data,
-                file_name=f"hunter_vault_{export_suffix}.csv",
+                file_name=export_name,
                 mime="text/csv",
                 disabled=export_df.empty,
-            )
+            ):
+                st.toast(
+                    f"Sucesso! Arquivo '{export_name}' preparado.",
+                    icon="✅",
+                )
             if not export_df.empty:
                 st.caption(f"{len(export_df)} linhas no CSV.")
-            st.download_button(
+            meta_name = f"hunter_meta_ads_{export_suffix}.csv"
+            if st.download_button(
                 "📥 Baixar Lista para Meta Ads (LAL)",
                 data=meta_csv,
-                file_name=f"hunter_meta_ads_{export_suffix}.csv",
+                file_name=meta_name,
                 mime="text/csv",
                 disabled=meta_df.empty,
-            )
+            ):
+                st.toast(
+                    f"Arquivo formatado para Lookalike pronto: '{meta_name}'.",
+                    icon="✅",
+                )
             if not meta_df.empty:
                 st.caption(f"{len(meta_df)} linhas no CSV Meta Ads.")
         with col_b:
