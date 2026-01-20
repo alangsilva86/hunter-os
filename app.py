@@ -151,6 +151,24 @@ def _parse_json_list(value: Any) -> List[Any]:
     return [value]
 
 
+def _person_primary(value: Any) -> Dict[str, Any]:
+    payload = _parse_json(value)
+    primary = payload.get("primary") if isinstance(payload, dict) else {}
+    return primary if isinstance(primary, dict) else {}
+
+
+def _wealth_label(person_raw: Any) -> str:
+    primary = _person_primary(person_raw)
+    label = str(primary.get("wealth_class") or "").upper()
+    if label == "A":
+        return "🟪 A"
+    if label == "B":
+        return "🟩 B"
+    if label == "C":
+        return "⬜ C"
+    return ""
+
+
 def _fetch_all_vault_rows(
     filters: Dict[str, Any],
     status_filter: str,
@@ -905,12 +923,19 @@ def _render_vault() -> None:
     df_vault["linkedin_link"] = df_vault["linkedin_company"].fillna("")
     df_vault["instagram_link"] = df_vault["instagram"].fillna("")
     df_vault["maps_link"] = df_vault["google_maps_url"].fillna("")
+    if "avatar_url" not in df_vault.columns:
+        df_vault["avatar_url"] = ""
+    else:
+        df_vault["avatar_url"] = df_vault["avatar_url"].fillna("")
+    df_vault["wealth_label"] = df_vault["person_json"].apply(_wealth_label)
 
     display_cols = [
+        "avatar_url",
         "cnpj",
         "razao_social",
         "enrichment_status",
         "status_label",
+        "wealth_label",
         "score_v2",
         "stack_tags",
         "site_link",
@@ -928,9 +953,11 @@ def _render_vault() -> None:
         disabled=[col for col in df_display.columns if col != "selecionar"],
         column_config={
             "selecionar": st.column_config.CheckboxColumn("Selecionar"),
+            "avatar_url": st.column_config.ImageColumn("Avatar", width="small"),
             "razao_social": st.column_config.TextColumn("Razao Social"),
             "enrichment_status": st.column_config.TextColumn("Status"),
             "status_label": st.column_config.TextColumn("Qualidade"),
+            "wealth_label": st.column_config.TextColumn("Wealth"),
             "score_v2": st.column_config.ProgressColumn("Score", min_value=0, max_value=100),
             "stack_tags": st.column_config.TextColumn("Tech Stack"),
             "site_link": st.column_config.LinkColumn("Site", display_text="🔗"),

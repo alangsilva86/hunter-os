@@ -169,6 +169,12 @@ def _parse_json(value: Any) -> Dict[str, Any]:
     return {}
 
 
+def _extract_person_primary(value: Any) -> Dict[str, Any]:
+    payload = _parse_json(value)
+    primary = payload.get("primary") if isinstance(payload, dict) else {}
+    return primary if isinstance(primary, dict) else {}
+
+
 def _flatten_flags(value: Any) -> str:
     flags = _parse_json(value)
     if not flags:
@@ -199,6 +205,25 @@ def _format_cpfs(value: Any) -> str:
                 cpfs.append(cpf)
     return ", ".join(cpfs)
 
+
+def _extract_linkedin_profile(row: Dict[str, Any]) -> str:
+    primary = _extract_person_primary(row.get("person_json"))
+    if primary.get("linkedin_profile"):
+        return str(primary.get("linkedin_profile"))
+    people = _coerce_list(row.get("linkedin_people_json"))
+    if people:
+        return str(people[0])
+    return ""
+
+
+def _extract_wealth_score(row: Dict[str, Any]) -> Any:
+    raw = row.get("wealth_score")
+    if raw not in (None, ""):
+        return raw
+    primary = _extract_person_primary(row.get("person_json"))
+    return primary.get("wealth_estimate") if primary else ""
+
+
 def format_export_data(
     rows: List[Dict[str, Any]],
     socios_map: Optional[Dict[str, List[Dict[str, Any]]]] = None,
@@ -224,6 +249,7 @@ def format_export_data(
         "site",
         "instagram",
         "linkedin_company",
+        "linkedin_people_json",
         "search_term_used",
         "discovery_method",
         "website_confidence",
@@ -238,6 +264,9 @@ def format_export_data(
         "score_label",
         "score_v2",
         "google_maps_url",
+        "person_json",
+        "avatar_url",
+        "wealth_score",
     ]:
         if col not in df.columns:
             df[col] = ""
@@ -281,6 +310,9 @@ def format_export_data(
         lambda row: _format_cpfs(socios_map.get(row.get("cnpj"), [])) if socios_map else "",
         axis=1,
     )
+    df["avatar_url"] = df["avatar_url"].fillna("")
+    df["linkedin_profile"] = df.apply(_extract_linkedin_profile, axis=1)
+    df["wealth_score"] = df.apply(lambda row: _extract_wealth_score(row), axis=1)
     df["cidade"] = df["municipio"]
     df["Stack Tecnol\u00f3gico"] = df["tech_stack_json"].apply(_stack_summary)
     df["whatsapp_probable"] = df["flags_json"].apply(lambda value: _flag_value(value, "whatsapp_probable"))
@@ -302,6 +334,9 @@ def format_export_data(
         "E-mails",
         "socios",
         "cpf",
+        "wealth_score",
+        "avatar_url",
+        "linkedin_profile",
         "site",
         "instagram",
         "linkedin_company",
@@ -375,6 +410,10 @@ def export_to_meta_ads(
             for part in re.split(r"[;,]", str(flat)):
                 if part.strip():
                     values.append(part.strip())
+
+        primary = _extract_person_primary(row.get("person_json"))
+        if primary.get("email"):
+            values.append(str(primary.get("email")))
 
         return list(dict.fromkeys(values))
 
@@ -489,12 +528,13 @@ def export_to_meta_ads(
         if not email and not phone:
             continue
 
-        partner_name = _main_partner_name(socios)
+        primary = _extract_person_primary(row.get("person_json"))
+        partner_name = primary.get("name") or _main_partner_name(socios)
         if not partner_name:
             partner_name = _name_from_email(email)
         fn, ln = _split_name(partner_name)
         try:
-            value = float(row.get("capital_social") or 0)
+            value = float(primary.get("wealth_estimate") or row.get("wealth_score") or row.get("capital_social") or 0)
         except (TypeError, ValueError):
             value = 0
 

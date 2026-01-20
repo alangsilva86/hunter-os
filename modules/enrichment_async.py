@@ -18,7 +18,7 @@ import aiohttp
 from bs4 import BeautifulSoup
 from fake_useragent import UserAgent
 
-from modules import storage, providers
+from modules import storage, providers, person_intelligence
 from modules.providers import ProviderResponseError, SearchProvider
 from modules.tech_detection import OptionalRenderedDetector, TechSniperDetector
 
@@ -341,6 +341,13 @@ class AsyncEnricher:
         self.backoff_base = float(os.getenv("PROVIDER_BACKOFF_BASE", "1.5"))
         self.backoff_max = float(os.getenv("PROVIDER_BACKOFF_MAX", "60"))
         self.rate_limiter = RateLimiter(self.max_rps)
+        self.person_intel = person_intelligence.PersonIntelligence(
+            evolution_base_url=os.getenv("EVOLUTION_API_URL"),
+            evolution_api_key=os.getenv("EVOLUTION_API_KEY"),
+            avatar_cache_dir=os.getenv("AVATAR_CACHE_DIR", "uploads/avatars"),
+            enable_email_finder=os.getenv("ENABLE_EMAIL_FINDER", "0") == "1",
+            enable_holehe=os.getenv("ENABLE_HOLEHE", "0") == "1",
+        )
 
     def _backoff_seconds(self, attempt: int) -> float:
         base = self.backoff_base ** max(1, attempt)
@@ -583,6 +590,9 @@ class AsyncEnricher:
             "website_match_reasons": [],
             "excluded_candidates_count": 0,
             "notes": "",
+            "wealth_score": 0,
+            "avatar_url": None,
+            "person_json": {},
         }
         discovery = await self._discover_website(session, lead)
         result.update(
@@ -662,6 +672,17 @@ class AsyncEnricher:
             if linkedin_people:
                 combined = list(dict.fromkeys(result.get("linkedin_people", []) + linkedin_people))
                 result["linkedin_people"] = combined[:5]
+
+        try:
+            person_payload = await self.person_intel.enrich(session, lead, result)
+            if person_payload:
+                result.update(person_payload)
+        except Exception as exc:
+            result["notes"] = (result.get("notes") or "").strip()
+            if result["notes"]:
+                result["notes"] = f"{result['notes']} | person_intel_failed"
+            else:
+                result["notes"] = f"person_intel_failed: {exc}"
 
         return result
 
@@ -762,6 +783,11 @@ class AsyncEnricher:
                     "rendered_used": bool(cached.get("rendered_used")),
                     "contact_quality": cached.get("contact_quality"),
                     "notes": cached.get("notes"),
+                    "wealth_score": cached.get("wealth_score") or 0,
+                    "avatar_url": cached.get("avatar_url"),
+                    "person_json": json.loads(cached.get("person_json") or "{}")
+                    if cached.get("person_json")
+                    else {},
                     "cache_hit": True,
                 }
                 results.append(result)
@@ -1085,6 +1111,13 @@ async def enrich_leads_hybrid(
     limiter = AdaptiveLimiter(concurrency)
     detector = TechSniperDetector(timeout=timeout)
     timeout_cfg = aiohttp.ClientTimeout(sock_connect=3, sock_read=5, total=max(8, timeout))
+    person_intel = person_intelligence.PersonIntelligence(
+        evolution_base_url=os.getenv("EVOLUTION_API_URL"),
+        evolution_api_key=os.getenv("EVOLUTION_API_KEY"),
+        avatar_cache_dir=os.getenv("AVATAR_CACHE_DIR", "uploads/avatars"),
+        enable_email_finder=os.getenv("ENABLE_EMAIL_FINDER", "0") == "1",
+        enable_holehe=os.getenv("ENABLE_HOLEHE", "0") == "1",
+    )
 
     async def _enrich_one(session: aiohttp.ClientSession, lead: Dict[str, Any]) -> Dict[str, Any]:
         result = {
@@ -1119,6 +1152,9 @@ async def enrich_leads_hybrid(
             "website_match_reasons": [],
             "excluded_candidates_count": 0,
             "notes": "",
+            "wealth_score": 0,
+            "avatar_url": None,
+            "person_json": {},
         }
         try:
             emails = lead.get("emails_norm") or []
@@ -1251,6 +1287,17 @@ async def enrich_leads_hybrid(
                         merged = list(dict.fromkeys(result.get("linkedin_people", []) + cleaned_links))
                         result["linkedin_people"] = merged[:5]
                         break
+
+            try:
+                person_payload = await person_intel.enrich(session, lead, result)
+                if person_payload:
+                    result.update(person_payload)
+            except Exception as exc:
+                result["notes"] = (result.get("notes") or "").strip()
+                if result["notes"]:
+                    result["notes"] = f"{result['notes']} | person_intel_failed"
+                else:
+                    result["notes"] = f"person_intel_failed: {exc}"
         except Exception as exc:
             result["notes"] = _sanitize_error_message(str(exc))
 

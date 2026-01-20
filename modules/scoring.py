@@ -44,6 +44,22 @@ def _as_list(value: Any) -> List[Any]:
     return [value]
 
 
+def _person_primary(value: Any) -> Dict[str, Any]:
+    if not value:
+        return {}
+    if isinstance(value, dict):
+        payload = value
+    elif isinstance(value, str):
+        try:
+            payload = json.loads(value)
+        except Exception:
+            return {}
+    else:
+        return {}
+    primary = payload.get("primary") if isinstance(payload, dict) else {}
+    return primary if isinstance(primary, dict) else {}
+
+
 def _normalize_token(text: str) -> str:
     decomposed = unicodedata.normalize("NFD", text or "")
     cleaned = "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn")
@@ -134,10 +150,18 @@ def score_with_reasons(lead: Dict[str, Any], enrichment: Dict[str, Any]) -> Tupl
         score = 80
         reasons.append("golden_tech_gate")
 
+    person_primary = _person_primary(enrichment.get("person_json"))
+    emails_source = lead.get("emails_norm") or lead.get("emails") or lead.get("email")
+    email_candidates = _as_list(emails_source)
+    person_email = person_primary.get("email") if isinstance(person_primary, dict) else None
+    if person_email:
+        email_candidates.append(person_email)
     partner_match, _matched_email = partner_email_match(
-        lead.get("emails_norm") or lead.get("emails") or lead.get("email"),
+        email_candidates,
         lead.get("socios") or lead.get("socios_json") or lead.get("quadro_societario"),
     )
+    if not partner_match and person_primary.get("decision_maker_match"):
+        partner_match = True
     if partner_match:
         score += 20
         reasons.append("decision_maker_email")

@@ -265,6 +265,9 @@ def init_db() -> None:
         _ensure_column(conn, "enrichments", "tech_sources", "TEXT")
         _ensure_column(conn, "enrichments", "score_version", "TEXT")
         _ensure_column(conn, "enrichments", "score_reasons", "TEXT")
+        _ensure_column(conn, "enrichments", "wealth_score", "REAL")
+        _ensure_column(conn, "enrichments", "avatar_url", "TEXT")
+        _ensure_column(conn, "enrichments", "person_json", "TEXT")
         cur.execute("CREATE INDEX IF NOT EXISTS idx_enrichments_run ON enrichments(run_id)")
 
         cur.execute(
@@ -833,8 +836,9 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
                     rendered_used, contact_quality, notes, enriched_at,
                     website_confidence, discovery_method, search_term_used,
                     candidates_considered, website_match_reasons, excluded_candidates_count,
-                    golden_techs_found, tech_sources, score_version, score_reasons
-                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    golden_techs_found, tech_sources, score_version, score_reasons,
+                    wealth_score, avatar_url, person_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 ON CONFLICT(cnpj) DO UPDATE SET
                     run_id=excluded.run_id,
                     site=excluded.site,
@@ -868,7 +872,10 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
                     golden_techs_found=excluded.golden_techs_found,
                     tech_sources=excluded.tech_sources,
                     score_version=excluded.score_version,
-                    score_reasons=excluded.score_reasons
+                    score_reasons=excluded.score_reasons,
+                    wealth_score=excluded.wealth_score,
+                    avatar_url=excluded.avatar_url,
+                    person_json=excluded.person_json
                 """,
                 (
                     cnpj,
@@ -905,6 +912,11 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
                     json.dumps(data.get("tech_sources", {}), ensure_ascii=False),
                     data.get("score_version"),
                     json.dumps(data.get("score_reasons", []), ensure_ascii=False),
+                    data.get("wealth_score"),
+                    data.get("avatar_url"),
+                    data.get("person_json")
+                    if isinstance(data.get("person_json"), str)
+                    else json.dumps(data.get("person_json", {}), ensure_ascii=False),
                 ),
             )
         except sqlite3.OperationalError as exc:
@@ -1251,7 +1263,8 @@ def _vault_select_sql() -> str:
         "e.fetch_ms, e.rendered_used, e.notes, e.enriched_at, "
         "e.website_confidence, e.discovery_method, e.search_term_used, "
         "e.candidates_considered, e.website_match_reasons, e.excluded_candidates_count, "
-        "e.golden_techs_found, e.tech_sources, e.score_version, e.score_reasons "
+        "e.golden_techs_found, e.tech_sources, e.score_version, e.score_reasons, "
+        "e.wealth_score, e.avatar_url, e.person_json "
         "FROM leads_clean lc LEFT JOIN enrichments e ON lc.cnpj = e.cnpj "
     )
 
@@ -1373,6 +1386,40 @@ def fetch_socios_by_cnpjs(cnpjs: List[str]) -> Dict[str, List[Dict[str, Any]]]:
             }
         )
     return result
+
+
+def find_cross_ownership(
+    cpf: Optional[str],
+    name: Optional[str],
+    exclude_cnpj: Optional[str] = None,
+    limit: int = 5,
+) -> List[Dict[str, Any]]:
+    if not cpf and not name:
+        return []
+    _ensure_schema()
+    params: List[Any] = []
+    clauses: List[str] = []
+    if cpf:
+        clauses.append("s.cpf = ?")
+        params.append(cpf)
+    if name:
+        clauses.append("LOWER(s.nome_socio) = ?")
+        params.append(str(name).strip().lower())
+    where_sql = " OR ".join(clauses) if clauses else "1=0"
+    if exclude_cnpj:
+        where_sql = f"({where_sql}) AND s.cnpj != ?"
+        params.append(exclude_cnpj)
+
+    sql = (
+        "SELECT s.cnpj, s.nome_socio, s.qualificacao, lc.razao_social, lc.nome_fantasia "
+        "FROM socios s LEFT JOIN leads_clean lc ON lc.cnpj = s.cnpj "
+        f"WHERE {where_sql} "
+        "ORDER BY lc.razao_social ASC LIMIT ?"
+    )
+    params.append(limit)
+    with get_conn() as conn:
+        rows = conn.execute(sql, params).fetchall()
+    return [dict(row) for row in rows]
 
 
 def update_lead_scores(cnpj: str, score_v2: int, score_label: str) -> None:
