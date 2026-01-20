@@ -190,4 +190,27 @@ def search_partners(
 
     with storage.get_conn() as conn:
         rows = conn.execute(sql, params).fetchall()
-    return [PersonCandidate.from_row(dict(row)) for row in rows]
+    results = [PersonCandidate.from_row(dict(row)) for row in rows]
+
+    try:
+        from modules.telemetry import logger as telemetry_logger
+
+        masked_cpf = ""
+        if cleaned_cpf and len(cleaned_cpf) >= 4:
+            masked_cpf = f"***{cleaned_cpf[-4:]}"
+        telemetry_logger.info(
+            "Busca PF executada",
+            extra={
+                "event_type": "search",
+                "query_type": "cpf" if cleaned_cpf else "name",
+                "target": cleaned_name or "",
+                "cpf": masked_cpf,
+                "city": city_norm,
+                "state": state_norm,
+                "result_count": len(results),
+            },
+        )
+    except Exception:
+        pass
+
+    return results

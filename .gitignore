@@ -1,2 +1,3 @@
 hunter.db
 logs/hunter.log
+.env

@@ -3,6 +3,7 @@
 import hashlib
 import json
 import logging
+import time
 import os
 import re
 from typing import Any, Dict, List, Optional, Tuple
@@ -297,6 +298,15 @@ class PersonIntelligence:
 
         except Exception as e:
             logger.warning(f"Avatar fetch failed for {phone_e164} on instance {instance_name}: {e}")
+            try:
+                from modules.telemetry import logger as telemetry_logger
+
+                telemetry_logger.error(
+                    f"Falha no avatar: {phone_e164}",
+                    extra={"event_type": "error", "trace": str(e)},
+                )
+            except Exception:
+                pass
             return None
 
         return None
@@ -407,6 +417,21 @@ class PersonIntelligence:
             "cross_ownership": cross,
         }
 
+        if wealth_class == "A":
+            try:
+                from modules.telemetry import logger as telemetry_logger
+
+                telemetry_logger.info(
+                    f"ALVO CLASSE A DETECTADO: R$ {wealth_estimate:,.2f}",
+                    extra={
+                        "event_type": "wealth",
+                        "amount": wealth_estimate,
+                        "role": qualificacao,
+                    },
+                )
+            except Exception:
+                pass
+
         if email_payload:
             payload["primary"]["email"] = email_payload.get("email") or ""
             payload["primary"]["email_validated"] = bool(email_payload.get("validated"))
@@ -436,7 +461,23 @@ class PersonIntelligence:
         avatar_url = None
         phone_e164 = self._select_phone(lead)
         if phone_e164:
+            start = time.time()
             avatar_url = await self.fetch_avatar(session, phone_e164)
+            duration_ms = round((time.time() - start) * 1000, 2)
+            if avatar_url:
+                try:
+                    from modules.telemetry import logger as telemetry_logger
+
+                    telemetry_logger.info(
+                        f"Avatar baixado em {duration_ms}ms",
+                        extra={
+                            "event_type": "api",
+                            "latency_ms": duration_ms,
+                            "provider": "Evolution/Baileys",
+                        },
+                    )
+                except Exception:
+                    pass
         if avatar_url:
             person_payload.setdefault("primary", {})["avatar_url"] = avatar_url
 

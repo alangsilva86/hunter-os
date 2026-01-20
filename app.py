@@ -28,6 +28,7 @@ except Exception:
 from etl_pipeline import HunterOrchestrator
 from modules import data_sources, enrichment_async, exports as webhook_exports, providers, scoring, storage
 from modules import person_intelligence, person_search
+from modules.telemetry import logger as telemetry_logger
 
 
 st.set_page_config(
@@ -38,6 +39,11 @@ st.set_page_config(
 )
 
 storage.init_db()
+
+telemetry_logger.info(
+    "Hunter OS Online & Ready to Hunt",
+    extra={"event_type": "startup"},
+)
 
 
 class _SessionLogHandler(logging.Handler):
@@ -1557,6 +1563,15 @@ def _render_person_hunter() -> None:
                     st.warning("Cidade vazia pode gerar homonimos. Recomendado preencher.")
 
                 if st.button("Rastrear Alvo", type="primary", key="person_hunter_search", use_container_width=True):
+                    telemetry_logger.info(
+                        f"Caçada Iniciada: {nome} em {cidade}",
+                        extra={
+                            "event_type": "search",
+                            "target": nome,
+                            "location": cidade,
+                            "state": uf,
+                        },
+                    )
                     candidates = person_search.search_partners(
                         name=nome,
                         cpf=cpf,
