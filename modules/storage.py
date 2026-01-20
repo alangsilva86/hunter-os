@@ -126,6 +126,8 @@ def init_db() -> None:
             """
         )
         cur.execute("CREATE INDEX IF NOT EXISTS idx_socios_cnpj ON socios(cnpj)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_socios_nome ON socios(nome_socio)")
+        cur.execute("CREATE INDEX IF NOT EXISTS idx_socios_cpf ON socios(cpf)")
 
         cur.execute(
             """
@@ -922,6 +924,32 @@ def upsert_enrichment(cnpj: str, data: Dict[str, Any]) -> None:
         except sqlite3.OperationalError as exc:
             logger.exception("upsert_enrichment failed (cnpj=%s): %s", cnpj, exc)
             raise
+
+
+def upsert_person_enrichment(
+    cnpj: str,
+    wealth_score: Any,
+    avatar_url: Optional[str],
+    person_json: Any,
+) -> None:
+    if not cnpj:
+        return
+    _ensure_schema()
+    payload = person_json if isinstance(person_json, str) else json.dumps(person_json or {}, ensure_ascii=False)
+    now = _utcnow()
+    with get_conn() as conn:
+        conn.execute(
+            """
+            INSERT INTO enrichments (cnpj, wealth_score, avatar_url, person_json, enriched_at)
+            VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT(cnpj) DO UPDATE SET
+                wealth_score=excluded.wealth_score,
+                avatar_url=excluded.avatar_url,
+                person_json=excluded.person_json,
+                enriched_at=COALESCE(enrichments.enriched_at, excluded.enriched_at)
+            """,
+            (cnpj, wealth_score, avatar_url, payload, now),
+        )
 
 
 def create_run(params: Dict[str, Any]) -> str:
