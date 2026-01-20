@@ -21,7 +21,12 @@ def _utcnow() -> str:
 
 
 def get_db_path() -> str:
-    return os.getenv("HUNTER_DB_PATH", DEFAULT_DB_PATH)
+    env_path = os.getenv("HUNTER_DB_PATH")
+    if env_path:
+        return env_path
+    if os.path.isdir("/data") and os.access("/data", os.W_OK):
+        return os.path.join("/data", "hunter.db")
+    return DEFAULT_DB_PATH
 
 
 def _ensure_schema() -> None:

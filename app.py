@@ -40,9 +40,14 @@ st.set_page_config(
 
 storage.init_db()
 
+db_path = storage.get_db_path()
 telemetry_logger.info(
     "Hunter OS Online & Ready to Hunt",
-    extra={"event_type": "startup"},
+    extra={
+        "event_type": "startup",
+        "db_path": db_path,
+        "db_persistent": db_path.startswith("/data/"),
+    },
 )
 
 
