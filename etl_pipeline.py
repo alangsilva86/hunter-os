@@ -1,6 +1,7 @@
 """Hunter OS v3 - Zero-touch orchestration."""
 
 import asyncio
+import csv
 import io
 import json
 import logging
@@ -48,6 +49,19 @@ def _env_int(key: str, default: int) -> int:
         return int(raw)
     except ValueError:
         return default
+
+
+def _detect_csv_dialect(file_path: str) -> csv.Dialect:
+    with open(file_path, "r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+        sample = handle.read(8192)
+    try:
+        return csv.Sniffer().sniff(sample, delimiters=";,\t|")
+    except csv.Error:
+        counts = {",": sample.count(","), ";": sample.count(";"), "\t": sample.count("\t"), "|": sample.count("|")}
+        best = max(counts, key=counts.get)
+        dialect = csv.excel
+        dialect.delimiter = best if counts[best] > 0 else ","
+        return dialect
 
 
 def _ensure_logger() -> logging.Logger:
@@ -433,7 +447,54 @@ class HunterOrchestrator:
     def _import_csv(self, run_id: str, export_uuid: str, file_path: str, cancel_event: threading.Event) -> None:
         self._update_stage(run_id, STAGE_BULK_IMPORT, status=STATUS_RUNNING)
         total_imported = 0
-        for chunk in pd.read_csv(file_path, chunksize=5000, dtype=str):
+        dialect = _detect_csv_dialect(file_path)
+        storage.log_event(
+            "info",
+            "v3_export_csv_dialect",
+            {"run_id": run_id, "delimiter": dialect.delimiter},
+        )
+        read_kwargs = {
+            "sep": dialect.delimiter,
+            "engine": "python",
+            "chunksize": 5000,
+            "dtype": str,
+            "encoding": "utf-8-sig",
+            "on_bad_lines": "skip",
+        }
+        if getattr(dialect, "quotechar", None):
+            read_kwargs["quotechar"] = dialect.quotechar
+        if getattr(dialect, "escapechar", None):
+            read_kwargs["escapechar"] = dialect.escapechar
+
+        def _iter_chunks():
+            try:
+                storage.log_event(
+                    "warning",
+                    "v3_import_csv_bad_lines",
+                    {"run_id": run_id, "action": "skip"},
+                )
+                for chunk in pd.read_csv(file_path, **read_kwargs):
+                    yield chunk
+            except Exception as exc:
+                storage.log_event(
+                    "warning",
+                    "v3_import_csv_pandas_failed",
+                    {"run_id": run_id, "error": str(exc)},
+                )
+                with open(file_path, "r", encoding="utf-8-sig", errors="ignore", newline="") as handle:
+                    reader = csv.DictReader(handle, dialect=dialect)
+                    batch = []
+                    for row in reader:
+                        if not row:
+                            continue
+                        batch.append(row)
+                        if len(batch) >= 5000:
+                            yield pd.DataFrame(batch)
+                            batch = []
+                    if batch:
+                        yield pd.DataFrame(batch)
+
+        for chunk in _iter_chunks():
             self._ensure_not_canceled(run_id, cancel_event)
             try:
                 rows = chunk.fillna("").to_dict(orient="records")
