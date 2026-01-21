@@ -64,7 +64,7 @@ CASA_DOS_DADOS_EXPORT_STATUS_V4_PUBLIC_URL=...
 
 ### Executar
 ```bash
-streamlit run app.py
+uvicorn server:app --host 0.0.0.0 --port 8000
 ```
 
 ## Como funciona a pesquisa
@@ -77,11 +77,10 @@ streamlit run app.py
 - **Score v2**: usa dados de enriquecimento e flags para pontuacao final.
 - **Vault**: resultados enriquecidos ficam reutilizaveis em `enrichments`.
 
-## UX (abas principais)
-- **Buscar**: roda o pipeline ou cria export CSV completo na Casa dos Dados.
-- **Exports (Casa dos Dados)**: fila real de exports + consulta do link (200/202).
-- **Recovery**: importa CSV ja baixado e reconstrui pipeline sem novas chamadas.
-- **Diagnostico**: etapas, chamadas de API e erros por run.
+## UI web leve
+- **Mission**: inicia caçadas e monitora etapas (probe, bulk, pipeline).
+- **Vault**: filtra leads enriquecidos e exporta CSV.
+- **Config**: define webhook basico.
 
 ## Enrichment Vault
 Tabela `enrichments` usa UPSERT por CNPJ para reaproveitar enriquecimentos antigos.

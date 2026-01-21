@@ -1,0 +1,131 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <div>
+      <h1>Vault</h1>
+      <p>Browse enriched leads, filter by quality signals, and export CSVs on demand.</p>
+    </div>
+    <div class="hero-chip">SQLite mode</div>
+  </section>
+
+  <section class="card">
+    <h2>Filters</h2>
+    <form class="form" method="get" action="/vault">
+      <div class="form-grid">
+        <label>
+          Status
+          <select name="status">
+            <option value="all" {% if status_filter == "all" %}selected{% endif %}>All</option>
+            <option value="enriched" {% if status_filter == "enriched" %}selected{% endif %}>Enriched</option>
+            <option value="pending" {% if status_filter == "pending" %}selected{% endif %}>Pending</option>
+          </select>
+        </label>
+        <label>
+          Min score
+          <input type="number" name="min_score" value="{{ filters.min_score or '' }}" />
+        </label>
+        <label>
+          Min tech score
+          <input type="number" name="min_tech_score" value="{{ filters.min_tech_score or '' }}" />
+        </label>
+        <label>
+          Min wealth
+          <input type="number" name="min_wealth" value="{{ filters.min_wealth or '' }}" />
+        </label>
+        <label>
+          Contact quality
+          <select name="contact_quality">
+            <option value="">Any</option>
+            <option value="ok" {% if filters.contact_quality == "ok" %}selected{% endif %}>ok</option>
+            <option value="suspicious" {% if filters.contact_quality == "suspicious" %}selected{% endif %}>suspicious</option>
+            <option value="accountant_like" {% if filters.contact_quality == "accountant_like" %}selected{% endif %}>accountant_like</option>
+          </select>
+        </label>
+        <label>
+          Municipio
+          <input name="municipio" value="{{ filters.municipio or '' }}" />
+        </label>
+        <label>
+          UF
+          <input name="uf" value="{{ filters.uf or '' }}" />
+        </label>
+        <label>
+          Has marketing
+          <select name="has_marketing">
+            <option value="" {% if filters.has_marketing is none %}selected{% endif %}>Any</option>
+            <option value="true" {% if filters.has_marketing %}selected{% endif %}>Yes</option>
+            <option value="false" {% if filters.has_marketing is not none and not filters.has_marketing %}selected{% endif %}>No</option>
+          </select>
+        </label>
+        <label>
+          Page size
+          <input type="number" name="page_size" value="{{ page_size }}" min="10" max="500" />
+        </label>
+      </div>
+      <button class="primary" type="submit">Apply filters</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <div class="card-head">
+      <div>
+        <h2>Results</h2>
+        <div class="muted">{{ total }} leads total</div>
+      </div>
+      <div class="export-buttons">
+        <a class="ghost" href="{{ export_prefix }}scope=page&format=standard">Export page CSV</a>
+        <a class="ghost" href="{{ export_prefix }}scope=all&format=standard">Export all CSV</a>
+        <a class="ghost" href="{{ export_prefix }}scope=all&format=meta">Export Meta Ads</a>
+      </div>
+    </div>
+    {% if rows %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>CNPJ</th>
+              <th>Razao social</th>
+              <th>Municipio</th>
+              <th>UF</th>
+              <th>Score</th>
+              <th>Status</th>
+              <th>Site</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in rows %}
+            <tr>
+              <td class="mono">{{ row.cnpj }}</td>
+              <td>{{ row.razao_social }}</td>
+              <td>{{ row.municipio }}</td>
+              <td>{{ row.uf }}</td>
+              <td>{{ row.score_v2 }}</td>
+              <td>{{ "enriched" if row.enriched_at else "pending" }}</td>
+              <td>
+                {% if row.site %}
+                  <a href="{{ row.site }}" target="_blank" rel="noreferrer">link</a>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+      <div class="pager">
+        <span>Page {{ page }} / {{ max_page }}</span>
+        <div class="pager-links">
+          {% if prev_link %}
+            <a class="ghost" href="{{ prev_link }}">Prev</a>
+          {% endif %}
+          {% if next_link %}
+            <a class="ghost" href="{{ next_link }}">Next</a>
+          {% endif %}
+        </div>
+      </div>
+    {% else %}
+      <p>No leads found for the current filters.</p>
+    {% endif %}
+  </section>
+{% endblock %}

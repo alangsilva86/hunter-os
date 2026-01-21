@@ -1,0 +1,24 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <div>
+      <h1>Config</h1>
+      <p>Manage webhook delivery without touching environment variables.</p>
+    </div>
+    <div class="hero-chip">SQLite mode</div>
+  </section>
+
+  <section class="card">
+    <h2>Webhook</h2>
+    {% if saved %}
+      <div class="notice">Saved.</div>
+    {% endif %}
+    <form class="form" method="post" action="/config/webhook">
+      <label>
+        Webhook URL
+        <input name="webhook_url" value="{{ webhook_url }}" placeholder="https://example.com/webhook" />
+      </label>
+      <button class="primary" type="submit">Save webhook</button>
+    </form>
+  </section>
+{% endblock %}

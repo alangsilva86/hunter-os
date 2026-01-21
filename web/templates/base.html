@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>{{ title or "Hunter OS" }}</title>
+    <link rel="stylesheet" href="/static/styles.css" />
+  </head>
+  <body>
+    <header class="topbar">
+      <div class="brand">
+        <span class="brand-mark">H</span>
+        <div class="brand-copy">
+          <div class="brand-title">Hunter OS</div>
+          <div class="brand-sub">Mission control for B2B hunting</div>
+        </div>
+      </div>
+      <nav class="nav">
+        <a href="/mission">Mission</a>
+        <a href="/vault">Vault</a>
+        <a href="/config">Config</a>
+      </nav>
+    </header>
+    <main class="main">
+      {% block content %}{% endblock %}
+    </main>
+  </body>
+</html>

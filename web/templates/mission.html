@@ -1,0 +1,168 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <div>
+      <h1>Mission Control</h1>
+      <p>Start a hunt, track stages, and keep SQLite running locally with fast status updates.</p>
+    </div>
+    <div class="hero-chip">SQLite mode</div>
+  </section>
+
+  <section class="grid-two">
+    <div class="card">
+      <h2>Start mission</h2>
+      <form class="form" method="post" action="/mission/start">
+        <div class="form-grid">
+          <label>
+            UF
+            <select name="uf">
+              {% for item in ["PR","SP","RJ","MG","SC","RS","BA","GO","DF"] %}
+                <option value="{{ item }}" {% if defaults.uf == item %}selected{% endif %}>{{ item }}</option>
+              {% endfor %}
+            </select>
+          </label>
+          <label>
+            Municipios (comma)
+            <input name="municipios" value="{{ defaults.municipios }}" placeholder="MARINGA, SARANDI" />
+          </label>
+          <label>
+            CNAEs (comma)
+            <input name="cnaes" value="{{ defaults.cnaes }}" placeholder="8211300, 8291100" />
+          </label>
+          <label>
+            Limite
+            <input name="limite" type="number" value="{{ defaults.limite }}" min="0" />
+          </label>
+          <label>
+            Page size
+            <input name="page_size" type="number" value="{{ defaults.page_size }}" min="50" max="1000" />
+          </label>
+          <label>
+            Cache TTL (hours)
+            <input name="cache_ttl_hours" type="number" value="{{ defaults.cache_ttl_hours }}" min="1" max="168" />
+          </label>
+          <label>
+            Phone repeat threshold
+            <input name="telefone_repeat_threshold" type="number" value="{{ defaults.telefone_repeat_threshold }}" min="2" max="20" />
+          </label>
+          <label>
+            Enrich top %
+            <input name="enrich_top_pct" type="number" value="{{ defaults.enrich_top_pct }}" min="5" max="100" />
+          </label>
+          <label>
+            Provider
+            <input name="provider" value="{{ defaults.provider }}" />
+          </label>
+        </div>
+        <div class="switch-row">
+          <label class="switch">
+            <input type="checkbox" name="excluir_mei" checked />
+            <span>Exclude MEI</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" name="com_telefone" />
+            <span>Phone required</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" name="com_email" />
+            <span>Email required</span>
+          </label>
+          <label class="switch">
+            <input type="checkbox" name="enable_enrichment" checked />
+            <span>Enable enrichment</span>
+          </label>
+        </div>
+        <button class="primary" type="submit">Start hunt</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Active run</h2>
+      {% if active_run %}
+        <div class="stat-grid">
+          <div>
+            <div class="stat-label">Run</div>
+            <div class="stat-value">{{ active_run_id }}</div>
+          </div>
+          <div>
+            <div class="stat-label">Status</div>
+            <div class="stat-value">{{ active_run.status }}</div>
+          </div>
+          <div>
+            <div class="stat-label">Stage</div>
+            <div class="stat-value">{{ stage_labels.get(active_run.current_stage, active_run.current_stage) }}</div>
+          </div>
+          <div>
+            <div class="stat-label">Processed</div>
+            <div class="stat-value">{{ active_run.processed_count }} / {{ active_run.total_leads }}</div>
+          </div>
+        </div>
+        <div class="progress">
+          <div class="progress-bar" style="width: {{ progress }}%"></div>
+        </div>
+        <div class="actions">
+          <form method="post" action="/mission/{{ active_run_id }}/pause">
+            <button type="submit" class="secondary">Pause</button>
+          </form>
+          <form method="post" action="/mission/{{ active_run_id }}/resume">
+            <button type="submit" class="secondary">Resume</button>
+          </form>
+        </div>
+        <div class="hint">Running: {{ "yes" if running else "no" }}</div>
+      {% else %}
+        <p>No active runs yet. Start a mission to see progress here.</p>
+      {% endif %}
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Recent runs</h2>
+    {% if runs %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Status</th>
+              <th>Stage</th>
+              <th>Created</th>
+              <th>Leads</th>
+              <th>Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for run in runs %}
+            <tr>
+              <td class="mono">{{ run.id }}</td>
+              <td>{{ run.status }}</td>
+              <td>{{ stage_labels.get(run.current_stage, run.current_stage) }}</td>
+              <td>{{ run.created_at }}</td>
+              <td>{{ run.processed_count }} / {{ run.total_leads }}</td>
+              <td><a href="/mission?run_id={{ run.id }}">View</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p>No runs stored yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Latest logs</h2>
+    {% if logs %}
+      <ul class="log-list">
+        {% for log in logs %}
+        <li>
+          <span class="mono">{{ log.created_at }}</span>
+          <span class="log-event">{{ log.event }}</span>
+          <span class="log-detail">{{ log.detail_json }}</span>
+        </li>
+        {% endfor %}
+      </ul>
+    {% else %}
+      <p>No logs for the selected run.</p>
+    {% endif %}
+  </section>
+{% endblock %}

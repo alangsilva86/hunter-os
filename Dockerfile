@@ -4,11 +4,10 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1 \
-    PORT=8501 \
+    PORT=8000 \
     ENABLE_PLAYWRIGHT=0 \
     HUNTER_DB_PATH=/data/hunter.db \
-    STREAMLIT_SERVER_HEADLESS=true \
-    STREAMLIT_BROWSER_GATHER_USAGE_STATS=false
+    WEB_CONCURRENCY=1
 
 WORKDIR /app
 
@@ -25,5 +24,5 @@ RUN pip install --upgrade pip && pip install -r requirements.txt
 COPY . .
 RUN mkdir -p /data
 
-EXPOSE 8501
-CMD ["sh", "-c", "streamlit run app.py --server.address 0.0.0.0 --server.port ${PORT}"]
+EXPOSE 8000
+CMD ["sh", "-c", "uvicorn server:app --host 0.0.0.0 --port ${PORT}"]
