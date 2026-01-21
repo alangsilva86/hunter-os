@@ -27,7 +27,7 @@ except Exception:
 
 from etl_pipeline import HunterOrchestrator
 from modules import data_sources, enrichment_async, exports as webhook_exports, providers, scoring, storage
-from modules import person_intelligence, person_search
+from modules import person_intelligence, person_search, validator
 from modules.telemetry import logger as telemetry_logger
 
 
@@ -1577,33 +1577,122 @@ def _render_person_hunter() -> None:
                             "state": uf,
                         },
                     )
-                    candidates = person_search.search_partners(
-                        name=nome,
-                        cpf=cpf,
-                        city=cidade,
-                        state=uf,
-                    )
-                    resolver = person_search.PersonResolver(candidates)
-                    result = resolver.resolve()
-                    st.session_state["person_hunter_status"] = result.get("status")
-                    st.session_state["person_hunter_candidates"] = [
-                        item.to_dict() for item in result.get("candidates", []) or []
-                    ]
-                    selected = result.get("person")
-                    if selected:
-                        selected_dict = selected.to_dict()
-                        selected_key = _person_candidate_key(selected_dict)
-                        st.session_state["person_hunter_selected"] = selected_key
-                        st.session_state["person_hunter_selected_candidate"] = selected_dict
+                    external_candidates: List[person_search.PersonCandidate] = []
+                    external_error = ""
+                    source = "local"
+
+                    with st.status("🕵️ Executando Protocolo de Busca Profunda...", state="running") as status:
+                        st.write("🔎 Buscando no banco local...")
+                        local_candidates = person_search.search_partners(
+                            name=nome,
+                            cpf=cpf,
+                            city=cidade,
+                            state=uf,
+                        )
+                        if local_candidates:
+                            candidates = local_candidates
+                        else:
+                            source = "external"
+                            status.update(
+                                label="🔍 Alvo nao encontrado localmente. Iniciando varredura na Open Web...",
+                                state="running",
+                            )
+                            if nome:
+                                try:
+                                    external_candidates = person_search.search_partners_external(
+                                        name=nome,
+                                        city=cidade,
+                                        state=uf,
+                                    )
+                                except Exception as exc:
+                                    external_error = str(exc)
+                            candidates = external_candidates
+                            if external_candidates:
+                                status.update(label="🌍 Encontrado na Web! Validando dados...", state="running")
+                                st.write("📡 Cruzando dados com Receita Federal...")
+                        status.update(label="Busca Finalizada", state="complete")
+
+                    st.session_state["person_hunter_source"] = source
+                    if source == "local":
+                        resolver = person_search.PersonResolver(candidates)
+                        result = resolver.resolve()
+                        st.session_state["person_hunter_status"] = result.get("status")
+                        st.session_state["person_hunter_candidates"] = [
+                            item.to_dict() for item in result.get("candidates", []) or []
+                        ]
+                        selected = result.get("person")
+                        if selected:
+                            selected_dict = selected.to_dict()
+                            selected_key = _person_candidate_key(selected_dict)
+                            st.session_state["person_hunter_selected"] = selected_key
+                            st.session_state["person_hunter_selected_candidate"] = selected_dict
+                        else:
+                            st.session_state["person_hunter_selected"] = None
+                            st.session_state["person_hunter_selected_candidate"] = None
                     else:
+                        st.session_state["person_hunter_status"] = "EXTERNAL" if external_candidates else "NOT_FOUND"
+                        st.session_state["person_hunter_candidates"] = [
+                            item.to_dict() for item in external_candidates
+                        ]
                         st.session_state["person_hunter_selected"] = None
                         st.session_state["person_hunter_selected_candidate"] = None
+                        st.session_state["person_hunter_external_error"] = external_error
+
                     st.session_state["person_hunter_dossier"] = None
 
                 status = st.session_state.get("person_hunter_status")
                 candidates = st.session_state.get("person_hunter_candidates") or []
                 if status == "NOT_FOUND":
+                    external_error = st.session_state.get("person_hunter_external_error") or ""
+                    if external_error:
+                        st.warning("Nao foi possivel completar a busca externa. Tente novamente.")
                     st.info("Nenhuma pessoa encontrada com esses parametros.")
+
+                if status == "EXTERNAL" and candidates:
+                    st.markdown(f"Encontramos {len(candidates)} pessoas validadas na Receita:")
+                    for idx, candidate in enumerate(candidates):
+                        capital = candidate.get("capital_social") or 0
+                        wealth_class = _wealth_class_from_capital(capital)
+                        highlight = "highlight" if wealth_class == "A" else ""
+                        badge = _badge_for_wealth(wealth_class)
+                        cnpj = candidate.get("cnpj") or ""
+                        empresa = candidate.get("nome_fantasia") or candidate.get("razao_social") or cnpj
+                        cidade_show = candidate.get("municipio") or ""
+                        uf_show = candidate.get("uf") or ""
+                        verified_badge = ""
+                        if candidate.get("is_verified"):
+                            verified_badge = (
+                                "<span style='background:#dcfce7;color:#166534;padding:2px 6px;"
+                                "border-radius:6px;font-size:12px;margin-left:6px;'>✅ Verificado na Receita</span>"
+                            )
+                        with st.container():
+                            st.markdown(
+                                f"<div class='candidate-card {highlight}'>"
+                                f"<div><strong>{candidate.get('nome_socio') or ''}</strong>{verified_badge} "
+                                f"| Socio na <strong>{empresa}</strong></div>"
+                                f"<div class='candidate-meta'>📍 {cidade_show}, {uf_show} "
+                                f"| 💰 Cap. Social: {_format_currency(capital)}</div>"
+                                f"<div class='badge-wealth'>{badge}</div>"
+                                f"</div>",
+                                unsafe_allow_html=True,
+                            )
+                            if st.button(
+                                "📥 Importar para o Vault",
+                                type="primary",
+                                key=f"person_hunter_import_{candidate.get('found_cnpj') or candidate.get('cnpj')}_{idx}",
+                            ):
+                                target_cnpj = candidate.get("found_cnpj") or candidate.get("cnpj") or ""
+                                if not target_cnpj:
+                                    st.error("CNPJ nao encontrado para importacao.")
+                                else:
+                                    with st.spinner("Salvando no Vault..."):
+                                        official = validator.get_official_qsa(target_cnpj)
+                                        saved = person_search.import_official_company(official)
+                                    if saved:
+                                        st.success("Importado no Vault. Refaça a busca para ver detalhes.")
+                                        st.rerun()
+                                    else:
+                                        st.error("Falha ao importar os dados oficiais.")
 
                 if status == "AMBIGUOUS" and candidates:
                     title_name = nome or candidates[0].get("nome_socio") or "Pessoa"

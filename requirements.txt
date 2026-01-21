@@ -18,3 +18,5 @@ holehe>=1.61
 email-validator>=2.1.0
 tldextract>=5.0.0
 python-json-logger>=2.0.7
+thefuzz>=0.22.1
+python-levenshtein>=0.25.1
