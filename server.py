@@ -205,6 +205,24 @@ def _humanize_event(event: str) -> str:
     return label.title()
 
 
+def _auto_resume_enabled() -> bool:
+    raw = os.getenv("AUTO_RESUME_RUNS", "1").strip().lower()
+    return raw not in {"0", "false", "no", "off"}
+
+
+def _last_error_reason(run_id: Optional[str], formatted_logs: Optional[List[Dict[str, Any]]] = None) -> str:
+    if not run_id:
+        return ""
+    errors = storage.fetch_errors(run_id=run_id, limit=1)
+    if errors:
+        return str(errors[0].get("error") or "")
+    if formatted_logs:
+        for log in formatted_logs:
+            if log.get("level_class") == "error" and log.get("message"):
+                return str(log["message"])
+    return ""
+
+
 def _format_log_entries(logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     stage_labels = _stage_labels()
     priority = [
@@ -271,6 +289,27 @@ def _format_log_entries(logs: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
     return formatted
 
 
+@app.on_event("startup")
+def auto_resume_runs() -> None:
+    if not _auto_resume_enabled():
+        return
+    try:
+        runs = storage.list_hunter_runs_by_status(["RUNNING"], limit=20)
+    except Exception:
+        return
+    for run in runs:
+        run_id = run.get("id")
+        if not run_id:
+            continue
+        if orchestrator.is_running(run_id):
+            continue
+        resumed = orchestrator.resume_job(run_id)
+        if resumed:
+            storage.log_event("info", "v3_auto_resume", {"run_id": run_id, "reason": "startup"})
+        else:
+            storage.log_event("warning", "v3_auto_resume_skipped", {"run_id": run_id, "reason": "not_resumable"})
+
+
 @app.get("/health")
 def health() -> Dict[str, str]:
     return {"status": "ok"}
@@ -318,6 +357,8 @@ def mission(
     active_status_class = "pending"
     active_stage_label = ""
     active_stage_class = "pending"
+    failure_reason = _last_error_reason(active_run_id, logs)
+    stalled_reason = ""
     if active_run:
         total = int(active_run.get("total_leads") or 0)
         processed = int(active_run.get("processed_count") or 0)
@@ -326,6 +367,8 @@ def mission(
         active_status_class = _status_class(active_run.get("status"))
         active_stage_label = _stage_labels().get(active_run.get("current_stage"), active_run.get("current_stage"))
         active_stage_class = _status_class(active_run.get("current_stage"))
+        if str(active_run.get("status") or "").upper() == "RUNNING" and not running:
+            stalled_reason = "Run is not active. Possible restart or crash. Use Resume or wait for auto-resume."
     defaults = {
         "uf": "PR",
         "municipios": "MARINGA",
@@ -353,6 +396,8 @@ def mission(
             "active_status_class": active_status_class,
             "active_stage_label": active_stage_label,
             "active_stage_class": active_stage_class,
+            "failure_reason": failure_reason,
+            "stalled_reason": stalled_reason,
         },
     )
 
@@ -804,7 +849,13 @@ def exports_poll(
     if not arquivo_uuid:
         return RedirectResponse(url="/exports?error=Missing arquivo_uuid", status_code=303)
     try:
-        data_sources.export_poll_v4_public(arquivo_uuid, run_id=None, include_corpo=True)
+        data_sources.export_poll_v4_public(
+            arquivo_uuid,
+            run_id=None,
+            include_corpo=True,
+            max_attempts=_env_int("CASA_EXPORT_POLL_MAX_ATTEMPTS", 20),
+            backoff_seconds=_env_int("CASA_EXPORT_POLL_BACKOFF_SECONDS", 2),
+        )
         return RedirectResponse(url="/exports?message=Export polled", status_code=303)
     except Exception as exc:
         return RedirectResponse(url=_add_query_param("/exports", error=str(exc)), status_code=303)
@@ -921,6 +972,7 @@ def diagnostics(
     api_calls: List[Dict[str, Any]] = []
     errors: List[Dict[str, Any]] = []
     logs: List[Dict[str, Any]] = []
+    failure_reason = ""
     if run_id:
         if run_type == "standard":
             selected = storage.get_run(run_id)
@@ -933,6 +985,7 @@ def diagnostics(
         else:
             selected = storage.get_hunter_run(run_id)
         logs = _format_log_entries(storage.fetch_logs(run_id=run_id, limit=50))
+        failure_reason = _last_error_reason(run_id, logs)
     return templates.TemplateResponse(
         "diagnostics.html",
         {
@@ -948,5 +1001,6 @@ def diagnostics(
             "logs": logs,
             "message": message,
             "error": error,
+            "failure_reason": failure_reason,
         },
     )

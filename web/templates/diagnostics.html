@@ -14,6 +14,9 @@
   {% if error %}
     <div class="notice error">{{ error }}</div>
   {% endif %}
+  {% if failure_reason %}
+    <div class="notice error">Run failed: {{ failure_reason }}</div>
+  {% endif %}
 
   <section class="card">
     <h2>Select run</h2>
@@ -51,7 +54,7 @@
           </thead>
           <tbody>
             {% for row in hunter_runs %}
-            <tr>
+            <tr class="{{ 'row-failed' if row.status_class == 'failed' else '' }}">
               <td class="mono">{{ row.id }}</td>
               <td><span class="pill {{ row.status_class }}">{{ row.status }}</span></td>
               <td>{{ row.stage_label }}</td>
@@ -82,7 +85,7 @@
           </thead>
           <tbody>
             {% for row in runs %}
-            <tr>
+            <tr class="{{ 'row-failed' if row.status_class == 'failed' else '' }}">
               <td class="mono">{{ row.run_id }}</td>
               <td><span class="pill {{ row.status_class }}">{{ row.status }}</span></td>
               <td>{{ row.enriched_count }} / {{ row.total_leads }}</td>

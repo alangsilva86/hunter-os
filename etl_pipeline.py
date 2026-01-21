@@ -42,6 +42,14 @@ class JobCanceled(Exception):
     pass
 
 
+def _env_int(key: str, default: int) -> int:
+    raw = os.getenv(key, str(default))
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def _ensure_logger() -> logging.Logger:
     logger = logging.getLogger("hunter")
     if getattr(logger, "_hunter_configured", False):
@@ -340,8 +348,9 @@ class HunterOrchestrator:
         job = storage.get_export_job(run_id) or {}
         if job.get("file_url"):
             return job["file_url"]
-        max_attempts = 30
-        backoff = 2
+        max_attempts = _env_int("BULK_POLL_MAX_ATTEMPTS", 30)
+        backoff = _env_int("BULK_POLL_BACKOFF_START", 2)
+        backoff_max = _env_int("BULK_POLL_BACKOFF_MAX", 10)
         for attempt in range(max_attempts):
             self._ensure_not_canceled(run_id, cancel_event)
             try:
@@ -395,7 +404,7 @@ class HunterOrchestrator:
                 if status in {"processado", "processado_com_erro"}:
                     break
             time.sleep(backoff)
-            backoff = min(backoff + 1, 10)
+            backoff = min(backoff + 1, backoff_max)
         raise RuntimeError("Timeout aguardando export bulk")
 
     @retry(

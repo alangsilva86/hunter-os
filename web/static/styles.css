@@ -344,6 +344,14 @@ tbody tr:hover {
   background: rgba(10, 132, 255, 0.06);
 }
 
+.row-failed {
+  background: rgba(214, 69, 69, 0.08);
+}
+
+.row-failed:hover {
+  background: rgba(214, 69, 69, 0.14);
+}
+
 .log-list {
   list-style: none;
   padding: 0;

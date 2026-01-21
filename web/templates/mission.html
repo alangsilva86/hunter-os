@@ -15,6 +15,13 @@
     <div class="hero-chip">SQLite mode</div>
   </section>
 
+  {% if failure_reason %}
+    <div class="notice error">Run failed: {{ failure_reason }}</div>
+  {% endif %}
+  {% if stalled_reason %}
+    <div class="notice">{{ stalled_reason }}</div>
+  {% endif %}
+
   <section class="grid-two">
     <div class="card">
       <h2>Start mission</h2>
@@ -147,7 +154,7 @@
           </thead>
           <tbody>
             {% for run in runs %}
-            <tr>
+            <tr class="{{ 'row-failed' if run.status_class == 'failed' else '' }}">
               <td class="mono">{{ run.id }}</td>
               <td><span class="pill {{ run.status_class }}">{{ run.status }}</span></td>
               <td>{{ run.stage_label }}</td>

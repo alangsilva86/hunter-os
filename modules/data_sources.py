@@ -808,6 +808,9 @@ def export_poll_v4_public(
                     quantidade_solicitada=None,
                     raw={"status_code": resp.status_code, "body_excerpt": response_excerpt},
                 )
+                if attempt < max_attempts - 1:
+                    time.sleep(backoff_seconds * (attempt + 1))
+                    continue
                 raise RuntimeError(
                     "Resposta vazia da Casa dos Dados ao consultar o export. Tente novamente em instantes."
                 )

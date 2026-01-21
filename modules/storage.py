@@ -1079,6 +1079,17 @@ def list_hunter_runs(limit: int = 50) -> List[Dict[str, Any]]:
     return [dict(row) for row in rows]
 
 
+def list_hunter_runs_by_status(statuses: Iterable[str], limit: int = 50) -> List[Dict[str, Any]]:
+    status_list = [status for status in statuses if status]
+    if not status_list:
+        return []
+    placeholders = ", ".join("?" for _ in status_list)
+    query = f"SELECT * FROM hunter_runs WHERE status IN ({placeholders}) ORDER BY created_at DESC LIMIT ?"
+    with get_conn() as conn:
+        rows = conn.execute(query, (*status_list, limit)).fetchall()
+    return [dict(row) for row in rows]
+
+
 def upsert_export_job(
     run_id: str,
     export_uuid_cd: Optional[str] = None,
