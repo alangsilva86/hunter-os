@@ -52,6 +52,10 @@ TIMEOUT=5
 HUNTER_DB_PATH=hunter.db
 ENABLE_PLAYWRIGHT=0
 PLAYWRIGHT_TIMEOUT_MS=8000
+BASIC_AUTH_USER=admin
+BASIC_AUTH_PASS=change-me
+MAX_EXPORT_ROWS=5000
+PERSON_BATCH_LIMIT=50
 ```
 
 ### Export Casa dos Dados
@@ -80,6 +84,10 @@ uvicorn server:app --host 0.0.0.0 --port 8000
 ## UI web leve
 - **Mission**: inicia caçadas e monitora etapas (probe, bulk, pipeline).
 - **Vault**: filtra leads enriquecidos e exporta CSV.
+- **Person**: busca socios e permite importacao no Vault.
+- **Exports**: monitora exports da Casa dos Dados e faz download.
+- **Recovery**: reprocessa CSVs ja baixados.
+- **Diagnostics**: logs, passos, chamadas de API e erros.
 - **Config**: define webhook basico.
 
 ## Enrichment Vault

@@ -1,0 +1,221 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <div>
+      <h1>Diagnostics</h1>
+      <p>Inspect runs, steps, API calls, and errors for troubleshooting.</p>
+    </div>
+    <div class="hero-chip">SQLite mode</div>
+  </section>
+
+  {% if message %}
+    <div class="notice">{{ message }}</div>
+  {% endif %}
+  {% if error %}
+    <div class="notice error">{{ error }}</div>
+  {% endif %}
+
+  <section class="card">
+    <h2>Select run</h2>
+    <form class="form" method="get" action="/diagnostics">
+      <div class="form-grid">
+        <label>
+          Run type
+          <select name="run_type">
+            <option value="hunter" {% if run_type == "hunter" %}selected{% endif %}>Hunter runs</option>
+            <option value="standard" {% if run_type == "standard" %}selected{% endif %}>Standard runs</option>
+          </select>
+        </label>
+        <label>
+          Run ID
+          <input name="run_id" value="{{ run_id or '' }}" />
+        </label>
+      </div>
+      <button class="primary" type="submit">Load</button>
+    </form>
+  </section>
+
+  <section class="card">
+    <h2>Recent hunter runs</h2>
+    {% if hunter_runs %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Status</th>
+              <th>Stage</th>
+              <th>Leads</th>
+              <th>Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in hunter_runs %}
+            <tr>
+              <td class="mono">{{ row.id }}</td>
+              <td><span class="pill {{ row.status_class }}">{{ row.status }}</span></td>
+              <td>{{ row.stage_label }}</td>
+              <td>{{ row.processed_count }} / {{ row.total_leads }}</td>
+              <td><a href="/diagnostics?run_type=hunter&run_id={{ row.id }}">View</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p>No hunter runs stored yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Recent standard runs</h2>
+    {% if runs %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Run</th>
+              <th>Status</th>
+              <th>Leads</th>
+              <th>Open</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in runs %}
+            <tr>
+              <td class="mono">{{ row.run_id }}</td>
+              <td><span class="pill {{ row.status_class }}">{{ row.status }}</span></td>
+              <td>{{ row.enriched_count }} / {{ row.total_leads }}</td>
+              <td><a href="/diagnostics?run_type=standard&run_id={{ row.run_id }}">View</a></td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p>No standard runs stored yet.</p>
+    {% endif %}
+  </section>
+
+  {% if selected %}
+    <section class="card">
+      <h2>Selected run</h2>
+      <pre class="mono">{{ selected }}</pre>
+    </section>
+  {% endif %}
+
+  {% if steps %}
+    <section class="card">
+      <h2>Run steps</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Step</th>
+              <th>Status</th>
+              <th>Started</th>
+              <th>Ended</th>
+              <th>Duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in steps %}
+            <tr>
+              <td>{{ row.step_name }}</td>
+              <td><span class="pill {{ row.status_class }}">{{ row.status }}</span></td>
+              <td>{{ row.started_at }}</td>
+              <td>{{ row.ended_at }}</td>
+              <td>{{ row.duration_ms }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
+  {% if api_calls %}
+    <section class="card">
+      <h2>API calls</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Step</th>
+              <th>Method</th>
+              <th>Status</th>
+              <th>URL</th>
+              <th>Duration</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in api_calls %}
+            <tr>
+              <td>{{ row.step_name }}</td>
+              <td>{{ row.method }}</td>
+              <td>{{ row.status_code }}</td>
+              <td class="mono">{{ row.url }}</td>
+              <td>{{ row.duration_ms }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
+  {% if errors %}
+    <section class="card">
+      <h2>Errors</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Step</th>
+              <th>Error</th>
+              <th>Created</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in errors %}
+            <tr>
+              <td>{{ row.step_name }}</td>
+              <td class="mono">{{ row.error }}</td>
+              <td>{{ row.created_at }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+
+  {% if logs %}
+    <section class="card">
+      <h2>Logs</h2>
+      <ul class="log-list">
+        {% for log in logs %}
+        <li class="log-item">
+          <div class="log-time mono">{{ log.created_at }}</div>
+          <div class="log-body">
+            <div class="log-head">
+              <span class="pill {{ log.level_class }}">{{ log.level|upper }}</span>
+              <span class="log-event">{{ log.event_label }}</span>
+            </div>
+            {% if log.message %}
+              <div class="log-message">{{ log.message }}</div>
+            {% endif %}
+            {% if log.meta_items %}
+              <div class="log-meta">
+                {% for item in log.meta_items %}
+                  <span class="meta-tag">{{ item.key }}: {{ item.value }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
+        </li>
+        {% endfor %}
+      </ul>
+    </section>
+  {% endif %}
+{% endblock %}

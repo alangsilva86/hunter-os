@@ -4,6 +4,13 @@
     <div>
       <h1>Mission Control</h1>
       <p>Start a hunt, track stages, and keep SQLite running locally with fast status updates.</p>
+      <div class="hero-meta">
+        <span class="subtle">Last updated {{ server_time }}</span>
+        <label class="toggle">
+          <input type="checkbox" data-auto-refresh data-auto-refresh-interval="20000" />
+          <span>Auto-refresh (20s)</span>
+        </label>
+      </div>
     </div>
     <div class="hero-chip">SQLite mode</div>
   </section>
@@ -86,11 +93,15 @@
           </div>
           <div>
             <div class="stat-label">Status</div>
-            <div class="stat-value">{{ active_run.status }}</div>
+            <div class="stat-value">
+              <span class="pill {{ active_status_class }}">{{ active_run.status }}</span>
+            </div>
           </div>
           <div>
             <div class="stat-label">Stage</div>
-            <div class="stat-value">{{ stage_labels.get(active_run.current_stage, active_run.current_stage) }}</div>
+            <div class="stat-value">
+              <span class="pill {{ active_stage_class }}">{{ active_stage_label }}</span>
+            </div>
           </div>
           <div>
             <div class="stat-label">Processed</div>
@@ -100,6 +111,7 @@
         <div class="progress">
           <div class="progress-bar" style="width: {{ progress }}%"></div>
         </div>
+        <div class="subtle">Progress {{ progress }}%</div>
         <div class="actions">
           <form method="post" action="/mission/{{ active_run_id }}/pause">
             <button type="submit" class="secondary">Pause</button>
@@ -108,7 +120,10 @@
             <button type="submit" class="secondary">Resume</button>
           </form>
         </div>
-        <div class="hint">Running: {{ "yes" if running else "no" }}</div>
+        <div class="meta-row">
+          <span class="subtle">Updated {{ active_run.updated_at or active_run.created_at }}</span>
+          <span class="pill {{ "running" if running else "paused" }}">{{ "Live" if running else "Idle" }}</span>
+        </div>
       {% else %}
         <p>No active runs yet. Start a mission to see progress here.</p>
       {% endif %}
@@ -134,8 +149,8 @@
             {% for run in runs %}
             <tr>
               <td class="mono">{{ run.id }}</td>
-              <td>{{ run.status }}</td>
-              <td>{{ stage_labels.get(run.current_stage, run.current_stage) }}</td>
+              <td><span class="pill {{ run.status_class }}">{{ run.status }}</span></td>
+              <td>{{ run.stage_label }}</td>
               <td>{{ run.created_at }}</td>
               <td>{{ run.processed_count }} / {{ run.total_leads }}</td>
               <td><a href="/mission?run_id={{ run.id }}">View</a></td>
@@ -154,10 +169,24 @@
     {% if logs %}
       <ul class="log-list">
         {% for log in logs %}
-        <li>
-          <span class="mono">{{ log.created_at }}</span>
-          <span class="log-event">{{ log.event }}</span>
-          <span class="log-detail">{{ log.detail_json }}</span>
+        <li class="log-item">
+          <div class="log-time mono">{{ log.created_at }}</div>
+          <div class="log-body">
+            <div class="log-head">
+              <span class="pill {{ log.level_class }}">{{ log.level|upper }}</span>
+              <span class="log-event">{{ log.event_label }}</span>
+            </div>
+            {% if log.message %}
+              <div class="log-message">{{ log.message }}</div>
+            {% endif %}
+            {% if log.meta_items %}
+              <div class="log-meta">
+                {% for item in log.meta_items %}
+                  <span class="meta-tag">{{ item.key }}: {{ item.value }}</span>
+                {% endfor %}
+              </div>
+            {% endif %}
+          </div>
         </li>
         {% endfor %}
       </ul>

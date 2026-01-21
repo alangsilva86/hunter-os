@@ -18,11 +18,65 @@
       <nav class="nav">
         <a href="/mission">Mission</a>
         <a href="/vault">Vault</a>
+        <a href="/person">Person</a>
+        <a href="/exports">Exports</a>
+        <a href="/recovery">Recovery</a>
+        <a href="/diagnostics">Diagnostics</a>
         <a href="/config">Config</a>
       </nav>
     </header>
     <main class="main">
       {% block content %}{% endblock %}
     </main>
+    <script>
+      (function () {
+        var toggle = document.querySelector("[data-auto-refresh]");
+        if (toggle) {
+          var key = "hunter:autoRefresh";
+          var intervalMs = parseInt(toggle.getAttribute("data-auto-refresh-interval") || "20000", 10);
+          var timer = null;
+          toggle.checked = localStorage.getItem(key) === "1";
+          var applyRefresh = function () {
+            if (timer) {
+              clearInterval(timer);
+            }
+            if (toggle.checked) {
+              timer = setInterval(function () {
+                window.location.reload();
+              }, intervalMs);
+            }
+          };
+          toggle.addEventListener("change", function () {
+            localStorage.setItem(key, toggle.checked ? "1" : "0");
+            applyRefresh();
+          });
+          applyRefresh();
+        }
+
+        document.addEventListener("click", function (event) {
+          var button = event.target.closest("[data-fill-target],[data-fill-targets]");
+          if (!button) {
+            return;
+          }
+          var value = button.getAttribute("data-fill-value") || "";
+          var targets = button.getAttribute("data-fill-targets");
+          var selector = button.getAttribute("data-fill-target");
+          var selectorList = [];
+          if (targets) {
+            selectorList = targets.split(",");
+          } else if (selector) {
+            selectorList = [selector];
+          }
+          selectorList.forEach(function (item) {
+            var field = document.querySelector(item.trim());
+            if (!field) {
+              return;
+            }
+            field.value = value;
+            field.focus();
+          });
+        });
+      })();
+    </script>
   </body>
 </html>

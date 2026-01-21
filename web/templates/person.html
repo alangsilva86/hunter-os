@@ -1,0 +1,152 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <div>
+      <h1>Person Hunter</h1>
+      <p>Search partners locally, optionally fall back to external discovery, and import to the Vault.</p>
+    </div>
+    <div class="hero-chip">SQLite mode</div>
+  </section>
+
+  {% if message %}
+    <div class="notice">{{ message }}</div>
+  {% endif %}
+  {% if error %}
+    <div class="notice error">{{ error }}</div>
+  {% endif %}
+
+  <section class="grid-two">
+    <div class="card">
+      <h2>Individual search</h2>
+      <form class="form" method="post" action="/person/search">
+        <div class="form-grid">
+          <label>
+            Name
+            <input name="name" value="{{ query.name or '' }}" placeholder="Full name" />
+          </label>
+          <label>
+            CPF (optional)
+            <input name="cpf" value="{{ query.cpf or '' }}" />
+          </label>
+          <label>
+            City
+            <input name="city" value="{{ query.city or '' }}" />
+          </label>
+          <label>
+            UF
+            <input name="uf" value="{{ query.uf or '' }}" />
+          </label>
+          <label>
+            Source
+            <select name="source">
+              <option value="auto" {% if query.source == "auto" %}selected{% endif %}>Auto</option>
+              <option value="local" {% if query.source == "local" %}selected{% endif %}>Local only</option>
+              <option value="external" {% if query.source == "external" %}selected{% endif %}>External only</option>
+            </select>
+          </label>
+        </div>
+        <button class="primary" type="submit">Search</button>
+      </form>
+    </div>
+
+    <div class="card">
+      <h2>Batch CSV</h2>
+      <p class="muted">CSV columns: nome, cidade, uf (optional: cpf)</p>
+      <form class="form" method="post" action="/person/batch" enctype="multipart/form-data">
+        <label>
+          File
+          <input type="file" name="file" accept=".csv" />
+        </label>
+        <label class="switch">
+          <input type="checkbox" name="use_external" />
+          <span>Use external fallback</span>
+        </label>
+        <button class="primary" type="submit">Process batch</button>
+      </form>
+      {% if batch_download_url %}
+        <div class="actions">
+          <a class="ghost" href="{{ batch_download_url }}">Download batch results</a>
+        </div>
+      {% endif %}
+    </div>
+  </section>
+
+  {% if results %}
+    <section class="card">
+      <h2>Results ({{ results|length }})</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Partner</th>
+              <th>Company</th>
+              <th>City</th>
+              <th>UF</th>
+              <th>Capital</th>
+              <th>Source</th>
+              <th>Import</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in results %}
+            <tr>
+              <td>{{ row.nome_socio }}</td>
+              <td>{{ row.nome_fantasia or row.razao_social or row.cnpj }}</td>
+              <td>{{ row.municipio }}</td>
+              <td>{{ row.uf }}</td>
+              <td>{{ row.capital_social }}</td>
+              <td>{{ "external" if row.is_external else "local" }}</td>
+              <td>
+                <form method="post" action="/person/import">
+                  <input type="hidden" name="cnpj" value="{{ row.found_cnpj or row.cnpj }}" />
+                  <input type="hidden" name="return_to" value="{{ request.url }}" />
+                  <button class="secondary" type="submit">Import</button>
+                </form>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% elif query.name or query.cpf %}
+    <section class="card">
+      <h2>Results</h2>
+      <p>No results found for the current query.</p>
+    </section>
+  {% endif %}
+
+  {% if batch_results %}
+    <section class="card">
+      <h2>Batch preview</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Name</th>
+              <th>City</th>
+              <th>UF</th>
+              <th>Status</th>
+              <th>CNPJ</th>
+              <th>Company</th>
+              <th>Email</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in batch_results %}
+            <tr>
+              <td>{{ row.nome }}</td>
+              <td>{{ row.cidade }}</td>
+              <td>{{ row.uf }}</td>
+              <td>{{ row.status }}</td>
+              <td class="mono">{{ row.cnpj }}</td>
+              <td>{{ row.empresa }}</td>
+              <td>{{ row.email_inferido }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  {% endif %}
+{% endblock %}

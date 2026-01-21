@@ -100,7 +100,11 @@
               <td>{{ row.municipio }}</td>
               <td>{{ row.uf }}</td>
               <td>{{ row.score_v2 }}</td>
-              <td>{{ "enriched" if row.enriched_at else "pending" }}</td>
+              <td>
+                <span class="pill {{ "completed" if row.enriched_at else "pending" }}">
+                  {{ "enriched" if row.enriched_at else "pending" }}
+                </span>
+              </td>
               <td>
                 {% if row.site %}
                   <a href="{{ row.site }}" target="_blank" rel="noreferrer">link</a>

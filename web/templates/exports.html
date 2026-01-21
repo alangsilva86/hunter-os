@@ -1,0 +1,123 @@
+{% extends "base.html" %}
+{% block content %}
+  <section class="hero">
+    <div>
+      <h1>Exports</h1>
+      <p>Monitor Casa dos Dados exports, poll status, and download CSV files.</p>
+    </div>
+    <div class="hero-chip">SQLite mode</div>
+  </section>
+
+  {% if message %}
+    <div class="notice">{{ message }}</div>
+  {% endif %}
+  {% if error %}
+    <div class="notice error">{{ error }}</div>
+  {% endif %}
+
+  <section class="card">
+    <h2>Actions</h2>
+    <div class="grid-two">
+      <form class="form" method="post" action="/exports/refresh">
+        <button class="primary" type="submit">Refresh export list</button>
+      </form>
+      <form class="form" method="post" action="/exports/poll">
+        <label>
+          arquivo_uuid
+          <input id="export-uuid-poll" name="arquivo_uuid" placeholder="UUID" />
+        </label>
+        <button class="secondary" type="submit">Poll public link</button>
+      </form>
+      <form class="form" method="post" action="/exports/download">
+        <label>
+          arquivo_uuid
+          <input id="export-uuid-download" name="arquivo_uuid" placeholder="UUID" />
+        </label>
+        <label>
+          Link (optional)
+          <input id="export-link-download" name="link" placeholder="https://..." />
+        </label>
+        <button class="secondary" type="submit">Download CSV</button>
+      </form>
+    </div>
+  </section>
+
+  <section class="card">
+    <h2>Casa exports</h2>
+    {% if exports %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>UUID</th>
+              <th>Status</th>
+              <th>Total</th>
+              <th>Link</th>
+              <th>Expires</th>
+              <th>Use</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in exports %}
+            <tr>
+              <td class="mono">{{ row.arquivo_uuid }}</td>
+              <td><span class="pill {{ row.status_class }}">{{ row.status }}</span></td>
+              <td>{{ row.total_linhas }}</td>
+              <td>
+                {% if row.link %}
+                  <a href="{{ row.link }}" target="_blank" rel="noreferrer">link</a>
+                {% else %}
+                  -
+                {% endif %}
+              </td>
+              <td>{{ row.expires_at }}</td>
+              <td>
+                <button
+                  type="button"
+                  class="ghost"
+                  data-fill-targets="#export-uuid-poll,#export-uuid-download"
+                  data-fill-value="{{ row.arquivo_uuid }}"
+                >
+                  Use UUID
+                </button>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p>No exports stored yet.</p>
+    {% endif %}
+  </section>
+
+  <section class="card">
+    <h2>Downloaded files</h2>
+    {% if files %}
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>UUID</th>
+              <th>Path</th>
+              <th>Size</th>
+              <th>Downloaded</th>
+            </tr>
+          </thead>
+          <tbody>
+            {% for row in files %}
+            <tr>
+              <td class="mono">{{ row.arquivo_uuid }}</td>
+              <td class="mono">{{ row.file_path }}</td>
+              <td>{{ row.file_size }}</td>
+              <td>{{ row.downloaded_at }}</td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    {% else %}
+      <p>No downloads recorded yet.</p>
+    {% endif %}
+  </section>
+{% endblock %}
