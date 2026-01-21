@@ -1,12 +1,14 @@
 """Hunter OS v3 - Zero-touch orchestration."""
 
 import asyncio
+import io
 import json
 import logging
 import os
 import threading
 import time
 import traceback
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 from uuid import uuid4
@@ -258,6 +260,58 @@ class HunterOrchestrator:
             try:
                 data = resp.json()
             except ValueError:
+                content_type = (resp.headers.get("Content-Type") or "").lower()
+                raw = resp.content or b""
+                file_path = None
+                if raw.startswith(b"PK"):
+                    try:
+                        tmp_dir = Path("tmp")
+                        tmp_dir.mkdir(parents=True, exist_ok=True)
+                        file_path = tmp_dir / f"{export_uuid}.csv"
+                        with zipfile.ZipFile(io.BytesIO(raw)) as zf:
+                            names = zf.namelist()
+                            csv_name = next((name for name in names if name.lower().endswith(".csv")), None)
+                            target_name = csv_name or (names[0] if names else None)
+                            if not target_name:
+                                raise RuntimeError("Arquivo zip sem conteudo")
+                            with zf.open(target_name) as src, open(file_path, "wb") as dst:
+                                while True:
+                                    chunk = src.read(1024 * 128)
+                                    if not chunk:
+                                        break
+                                    dst.write(chunk)
+                    except Exception as exc:
+                        storage.log_event(
+                            "warning",
+                            "v3_export_poll_public_zip_failed",
+                            {"run_id": run_id, "error": str(exc)},
+                        )
+                        file_path = None
+                elif "text/csv" in content_type or "application/csv" in content_type:
+                    tmp_dir = Path("tmp")
+                    tmp_dir.mkdir(parents=True, exist_ok=True)
+                    file_path = tmp_dir / f"{export_uuid}.csv"
+                    with open(file_path, "wb") as handle:
+                        handle.write(raw)
+
+                if file_path:
+                    storage.upsert_export_job(
+                        run_id,
+                        export_uuid_cd=export_uuid,
+                        file_path_local=str(file_path),
+                    )
+                    storage.log_event(
+                        "info",
+                        "v3_export_poll_public_file",
+                        {
+                            "run_id": run_id,
+                            "export_uuid": export_uuid,
+                            "file_path": str(file_path),
+                            "content_type": content_type,
+                            "size": len(raw),
+                        },
+                    )
+                    return {"status": "ready", "file_path": str(file_path)}
                 storage.log_event(
                     "warning",
                     "v3_export_poll_public_non_json",
@@ -299,15 +353,23 @@ class HunterOrchestrator:
                     {"run_id": run_id, "error": str(exc)},
                 )
                 result = {"status": "error"}
-            if result.get("status") == "ready" and result.get("link"):
-                expires_at = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(result["expires_at"]))
-                storage.upsert_export_job(
-                    run_id,
-                    export_uuid_cd=export_uuid,
-                    file_url=result["link"],
-                    expires_at=expires_at,
-                )
-                return result["link"]
+            if result.get("status") == "ready":
+                if result.get("file_path"):
+                    storage.upsert_export_job(
+                        run_id,
+                        export_uuid_cd=export_uuid,
+                        file_path_local=result["file_path"],
+                    )
+                    return ""
+                if result.get("link"):
+                    expires_at = time.strftime("%Y-%m-%d %H:%M:%S", time.gmtime(result["expires_at"]))
+                    storage.upsert_export_job(
+                        run_id,
+                        export_uuid_cd=export_uuid,
+                        file_url=result["link"],
+                        expires_at=expires_at,
+                    )
+                    return result["link"]
             if result.get("status") == "processing":
                 time.sleep(backoff)
                 continue
@@ -400,8 +462,11 @@ class HunterOrchestrator:
         if not link:
             link = self._poll_export_link(run_id, export_uuid, cancel_event)
         self._ensure_not_canceled(run_id, cancel_event)
+        job = storage.get_export_job(run_id) or job
         file_path = job.get("file_path_local") if job else None
         if not file_path or not Path(file_path).exists():
+            if not link:
+                raise RuntimeError("Link de download ausente e arquivo local nao encontrado")
             file_path = self._download_file(run_id, export_uuid, link)
         self._ensure_not_canceled(run_id, cancel_event)
         self._import_csv(run_id, export_uuid, file_path, cancel_event)
